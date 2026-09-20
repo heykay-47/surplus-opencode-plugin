@@ -19,9 +19,7 @@ Thumbs.db
 *.log
 npm-debug.log*
 
-# Test files
-test/
-tests/
+# Test output
 coverage/
 
 # Build artifacts
@@ -36,3 +34,9 @@ build/
 # Temporary files
 tmp/
 temp/
+
+# Local agent and project planning files (never publish)
+.agent/
+docs/
+AGENTS.md
+CONTEXT.md

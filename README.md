@@ -1,123 +1,34 @@
-# OpenCode Persistent Model Discovery
+# opencode-surplus
 
-An [OpenCode](https://opencode.ai) plugin that discovers and persistently caches AI models from OpenAI-compatible providers. Solves the race condition where OpenCode's provider resolution runs before async model discovery completes.
+`opencode-surplus` is a Surplus provider integration for OpenCode. It keeps a
+credential-free local copy of the public Surplus model inventory and exposes
+only the exact models selected in your OpenCode provider configuration.
 
-## The Problem
+It supports:
 
-OpenCode has a built-in `opencode-models-discovery` plugin that fetches models from provider APIs. However, it runs asynchronously during the config hook. OpenCode's provider resolution (which validates that requested models exist) runs **before** the async discovery finishes. This causes:
+- OpenCode V1 `>=1.18.29`
+- the current OpenCode V2 plugin API
+- one shared runtime-neutral inventory core with thin V1 and V2 adapters
+- rich Surplus catalog metadata in V2 and a compatible down-map in V1
+- cache-first startup with a one-hour refresh TTL and a manual refresh command
 
-```
-ProviderModelNotFoundError: Model not found: surplus/claude-opus-4.8
-```
+## Select models
 
-Even though the model exists and the API is accessible.
+Discovery never exposes every model automatically. Add the exact Surplus model
+IDs you want to use.
 
-## The Solution
+### OpenCode V1
 
-This plugin implements a **two-phase discovery strategy**:
-
-1. **Phase 1 - Synchronous Cache Load**: At startup, immediately loads previously discovered models from a local cache file (`~/.cache/opencode/models-{provider}.json`). These are merged into the provider's model map before OpenCode resolves providers.
-
-2. **Phase 2 - Async Background Refresh**: After startup, asynchronously fetches the latest models from the provider's API and updates the cache for the next session.
-
-This means models are always available immediately, while staying up-to-date in the background.
-
-## Architecture
-
-```
-              ┌──────────────────────────────────────────────────────┐
-              │              OpenCode Startup Lifecycle              │
-              └──────────────────────────────────────────────────────┘
-                                          │
-                                          ▼
-                                ┌──────────────────┐
-                                │   config() hook  │
-                                │      fires       │
-                                └────────┬─────────┘
-                                         │
-              ┌──────────────────────────┼──────────────────────────┐
-              │                          │                          │
-              ▼                          ▼                          ▼
-     ┌──────────────┐           ┌──────────────┐           ┌──────────────┐
-     │ opencode.json│           │  Cache File  │           │ Provider API │
-     │              │           │ ~/.cache/    │           │ {baseURL}/   │
-     │ • baseURL    │           │ opencode/    │           │   models     │
-     │ • apiKey     │           │models-*.json │           │              │
-     └──────┬───────┘           └──────┬───────┘           └──────┬───────┘
-            │                          │                          │
-            │  provider settings       │  cached models           │  fresh models
-            │  (baseURL, apiKey)       │  (from last sync)        │  (current)
-            │                          │                          │
-            └────────────┬─────────────┴─────────────┬────────────┘
-                         │                           │
-                         ▼                           │
-              ┌──────────────────────┐               │
-              │   Phase 1: Cache     │               │
-              │       Load           │               │
-              │                      │               │
-              │  Read cache file     │               │
-              │  Merge into          │               │
-              │   p.models           │               │
-              │  (immediate)         │               │
-              └──────────┬───────────┘               │
-                         │                           │
-                         ▼                           │
-              ┌──────────────────────┐               │
-              │   Phase 2: API       │◀──────────────┘
-              │      Refresh         │
-              │                      │
-              │  Fetch /v1/models    │
-              │  Write to cache      │──────▶ cache file
-              │  Merge into          │
-              │   p.models           │
-              │  (current session)   │
-              └──────────┬───────────┘
-                         │
-                         ▼
-              ┌──────────────────────┐
-              │  config() returns    │
-              │  (models merged)     │
-              └──────────┬───────────┘
-                         │
-                         ▼
-              ┌──────────────────────┐
-              │  Provider Resolution │
-              │  (models ready ✅)   │
-              └──────────────────────┘
-```
-
-Both phases run inside OpenCode's `config` hook. Phase 1 awaits the cache read so models are merged into `provider.{name}.models` before the hook returns, and Phase 2 awaits the API fetch plus cache write in the same hook. By the time OpenCode validates the requested model, both cached and freshly discovered entries are already in `p.models`, eliminating the race condition.
-
-## Installation
-
-### Method 1: Local Directory (Recommended for Development)
-
-1. Clone or download this repository
-2. Add to your `opencode.json` config file:
-
-```json
+```jsonc
 {
-  "plugin": [
-    "/path/to/opencode-persistent-model-discovery"
-  ],
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-surplus"],
   "provider": {
     "surplus": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Surplus Intelligence",
-      "options": {
-        "baseURL": "https://www.surplusintelligence.ai/api/inference/v1",
-        "modelsDiscovery": {
-          "enabled": true
-        }
-      }
-    },
-    "openrouter": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "OpenRouter",
-      "options": {
-        "baseURL": "https://openrouter.ai/api/v1",
-        "modelsDiscovery": {
-          "enabled": true
+      "models": {
+        "deepseek-v4-flash": {},
+        "minimax-m2.1": {
+          "name": "MiniMax M2.1 (my label)"
         }
       }
     }
@@ -125,391 +36,119 @@ Both phases run inside OpenCode's `config` hook. Phase 1 awaits the cache read s
 }
 ```
 
-### Method 2: From npm (When Published)
+### OpenCode V2
 
-```bash
-npm install opencode-persistent-model-discovery
-```
-
-Then in `opencode.json`:
-```json
+```jsonc
 {
-  "plugin": [
-    "opencode-persistent-model-discovery"
-  ]
-}
-```
-
-### Method 3: GitHub Direct
-
-```json
-{
-  "plugin": [
-    "github:lprzychodzien/opencode-persistent-model-discovery"
-  ]
-}
-```
-
-## Quick Start
-
-### Step 1: Configure Your Provider
-
-Ensure your provider has `modelsDiscovery.enabled: true`:
-
-```json
-{
-  "provider": {
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["opencode-surplus"],
+  "providers": {
     "surplus": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Surplus Intelligence",
-      "options": {
-        "baseURL": "https://www.surplusintelligence.ai/api/inference/v1",
-        "modelsDiscovery": {
-          "enabled": true
-        }
+      "models": {
+        "deepseek-v4-flash": {},
+        "minimax-m2.1": {}
       }
     }
   }
 }
 ```
 
-**Configuration Options:**
-- `baseURL` (required): The provider's API base URL. Must include `/v1` for OpenAI-compatible providers. The plugin requests models from `{baseURL}/models`.
-- `modelsDiscovery.enabled` (required): Must be `true` for this plugin to process the provider.
-- `apiKey` (optional): Explicit API key. If omitted, plugin reads from OpenCode's auth store.
+An empty `models` map intentionally leaves the Surplus provider loaded with
+zero models. A model missing from a valid catalog is hidden and logged. Manual
+model metadata wins over catalog metadata when both define the same property.
 
-### Step 2: Set Up Authentication
+Configure Surplus credentials through OpenCode's normal provider
+authentication. Catalog discovery is public and does not read or send the
+inference API key.
 
-Store your API key in OpenCode's auth store (recommended):
+## Endpoint and policy overrides
+
+The default catalog endpoint is:
+
+```text
+https://api.surplusintelligence.ai/v1/models
+```
+
+The integration owns the Surplus provider defaults. Explicit endpoint settings
+are retained for local proxies and testing:
+
+- V1: `provider.surplus.options.baseURL`
+- V2: `providers.surplus.settings.baseURL`
+
+Advanced plugin options can change the cache TTL. V1 uses a tuple and V2 uses
+an object:
+
+```jsonc
+// V1
+{ "plugin": [["opencode-surplus", { "ttlHours": 6 }]] }
+
+// V2
+{ "plugins": [{ "package": "opencode-surplus", "options": { "ttlHours": 6 } }] }
+```
+
+The supported options are `ttlHours`, `ttlMs`, `endpoint`, and `cacheDir`.
+The last two are intended for proxies, tests, and isolated environments.
+
+## Cache and refresh behavior
+
+The adapters share this cache:
+
+```text
+~/.cache/opencode/surplus-models.json
+```
+
+`XDG_CACHE_HOME` is honored. The cache is versioned, scoped to the normalized
+Surplus endpoint, contains no credentials, and is written atomically. The
+upstream fork's legacy `models-surplus.json` cache is imported opportunistically
+and never written again.
+
+At startup the integration loads a last-known-good inventory first. A fresh
+cache avoids a request. A stale cache is used immediately while one bounded
+10-second refresh runs in the background. A cache miss makes one bounded request
+so the first session can be populated. There are no startup retries or
+permanent interval timers.
+
+Only a valid, non-empty catalog replaces the inventory. Empty, malformed, and
+failed responses retain the last-known-good inventory. The V2 adapter reloads
+the provider registry after a successful background refresh; V1 uses the fresh
+cache on the next startup.
+
+## CLI
+
+After installing the package, use the version-neutral CLI:
 
 ```bash
-opencode auth add surplus
-opencode auth add openrouter
-# Enter your API key when prompted
+opencode-surplus list
+opencode-surplus refresh
 ```
 
-Or set it in your config (less secure):
-```json
-{
-  "provider": {
-    "surplus": {
-      "options": {
-        "apiKey": "your-api-key-here"
-      }
-    },
-    "openrouter": {
-      "options": {
-        "apiKey": "your-api-key-here"
-      }
-    }
-  }
-}
-```
-
-### Step 3: Initial Cache Population
-
-Run the sync script to discover and cache models (once per provider):
-
-```bash
-cd /path/to/opencode-persistent-model-discovery
-node sync-models.mjs surplus
-node sync-models.mjs openrouter
-```
-
-Expected output:
-```
-🔍 Model Sync: surplus
-=====================
-📡 Fetching models from https://www.surplusintelligence.ai/api/inference/v1...
-   URL: https://www.surplusintelligence.ai/api/inference/v1/models
-✅ Found 242 models
-💾 Saved 242 models to cache
-📁 Cache file: ~/.cache/opencode/models-surplus.json
-📝 Note: Models are now cached and will be loaded at startup
-```
-
-### Step 4: Start OpenCode
-
-```bash
-opencode
-```
-
-Models are loaded from cache at startup. The plugin will also refresh the cache in the background.
-
-## File Reference
-
-### Plugin File: `src/index.ts`
-
-The main plugin that hooks into OpenCode's config phase.
-
-**Key Behaviors:**
-- Loads cached models synchronously before provider resolution
-- Runs async discovery after startup to refresh cache
-- Handles timeouts (10s for API calls)
-- Reads API keys from auth store or config
-- Supports multiple providers simultaneously
-
-**Cache Location:** `~/.cache/opencode/models-{providerName}.json`
-
-### Sync Script: `sync-models.mjs`
-
-Standalone script to manually refresh the model cache for a provider.
-
-**Use Cases:**
-- First-time setup
-- After provider adds new models
-- When you see "Model not found" errors (cache is stale)
-- CI/CD pipelines to pre-populate cache
-
-**Command:**
-```bash
-node sync-models.mjs <provider>
-# e.g. node sync-models.mjs surplus
-```
-
-**What it does:**
-1. Reads `opencode.json` to find the provider's config
-2. Reads `~/.local/share/opencode/auth.json` for the API key
-3. Fetches `{baseURL}/models` from the provider API
-4. Saves results to `~/.cache/opencode/models-{provider}.json`
-5. Does NOT modify `opencode.json`
-
-### Clean Script: `clean-config.mjs`
-
-Removes hardcoded models from a provider in your config and enables discovery mode.
-
-**Use Case:** When migrating from manual model lists to cached discovery.
-
-**Command:**
-```bash
-node clean-config.mjs <provider>
-# e.g. node clean-config.mjs surplus
-```
-
-**What it does:**
-1. Reads `opencode.json`
-2. Empties `provider.{provider}.models` section
-3. Sets `modelsDiscovery.enabled: true`
-4. Saves config
-
-## Cache Management
-
-### Where is the Cache?
-
-The plugin uses `XDG_CACHE_HOME` if set, otherwise it falls back to `~/.cache/opencode/` on all platforms:
-
-```
-$XDG_CACHE_HOME/opencode/models-{provider}.json   # if XDG_CACHE_HOME is set
-~/.cache/opencode/models-{provider}.json           # default (macOS, Linux, Windows)
-```
-
-### Cache Format
-
-```json
-{
-  "claude-opus-4.8": {
-    "id": "claude-opus-4.8",
-    "name": "Claude Opus 4.8"
-  },
-  "gpt-5.5": {
-    "id": "gpt-5.5",
-    "name": "GPT 5.5"
-  }
-}
-```
-
-Each entry has:
-- `id`: Model identifier (used in API requests)
-- `name`: Human-readable display name
-
-### Updating the Cache
-
-**Manual update:**
-```bash
-node sync-models.mjs surplus
-```
-
-**Automated update (cron):**
-```bash
-# Run daily at 9 AM
-0 9 * * * cd /path/to/plugin && node sync-models.mjs surplus
-```
-
-**Shell alias:**
-```bash
-# Add to .bashrc or .zshrc
-alias sync-models='node /path/to/opencode-persistent-model-discovery/sync-models.mjs surplus'
-```
-
-### Clearing the Cache
-
-```bash
-rm ~/.cache/opencode/models-*.json
-```
-
-Next startup will run without cached models (Phase 2 will repopulate).
-
-## Supported Providers
-
-Any provider implementing the OpenAI `/v1/models` endpoint:
-
-| Provider | Base URL | Status |
-|----------|----------|--------|
-| [Surplus Intelligence](https://surplusintelligence.ai) | `https://www.surplusintelligence.ai/api/inference/v1` | ✅ Tested |
-| [OpenRouter](https://openrouter.ai) | `https://openrouter.ai/api/v1` | ✅ Compatible |
-| [Ollama](https://ollama.com) | `http://localhost:11434/v1` | ✅ Compatible |
-| [LiteLLM](https://litellm.ai) | Custom | ✅ Compatible |
-| Custom proxies | Custom | ✅ Compatible |
-
-## Troubleshooting
-
-### "Model not found" Error
-
-**Cause:** Cache is stale or missing.
-**Fix:**
-```bash
-node sync-models.mjs surplus
-```
-
-### "No API key found"
-
-**Cause:** Auth not configured.
-**Fix:**
-```bash
-opencode auth add surplus
-# Or add to config: "apiKey": "your-key"
-```
-
-### "Discovery failed: 404"
-
-**Cause:** Incorrect baseURL or endpoint.
-**Fix:** Verify `baseURL` includes `/v1`:
-```json
-"baseURL": "https://api.example.com/api/inference/v1"
-```
-
-### "Config object is frozen"
-
-**Cause:** Plugin loaded too late in OpenCode lifecycle.
-**Fix:** Ensure plugin is listed first in `opencode.json` plugins array.
-
-### Provider not being processed
-
-**Checklist:**
-1. Provider has `modelsDiscovery.enabled: true`
-2. Provider has `baseURL` configured
-3. API key is accessible (auth store or config)
-4. Plugin is listed in `opencode.json` plugins array
-5. Plugin path is correct
-
-## API Key Resolution
-
-The plugin resolves API keys in this priority order:
-
-1. `provider.options.apiKey` in `opencode.json`
-2. OpenCode auth store: `~/.local/share/opencode/auth.json` (entries of `type: "api"`)
-
-**Recommendation:** Use the auth store for security. Never commit API keys to version control.
-
-## Multiple Providers
-
-The plugin supports multiple providers simultaneously. Each provider gets its own cache file:
-
-```json
-{
-  "provider": {
-    "surplus": {
-      "options": {
-        "baseURL": "https://www.surplusintelligence.ai/api/inference/v1",
-        "modelsDiscovery": { "enabled": true }
-      }
-    },
-    "openrouter": {
-      "options": {
-        "baseURL": "https://openrouter.ai/api/v1",
-        "modelsDiscovery": { "enabled": true }
-      }
-    }
-  }
-}
-```
-
-This creates:
-- `~/.cache/opencode/models-surplus.json`
-- `~/.cache/opencode/models-openrouter.json`
-
-Run `node sync-models.mjs <provider>` for each provider you configure.
-
-## Comparison: Built-in vs This Plugin
-
-| Feature | Built-in Discovery | Persistent Discovery |
-|---------|-------------------|----------------------|
-| Timing | Async (after resolution) | Sync cache + async refresh |
-| Persistence | In-memory only | Cache file on disk |
-| Startup models | Available after delay | Available immediately |
-| Config pollution | None | None (cache is separate) |
-| Error handling | Silent failures | Logs to console |
-| Multi-provider | Yes | Yes |
-| Manual refresh | Not available | `sync-*.mjs` script |
+`list` shows the cached inventory and marks selected IDs. `refresh` performs one
+public catalog request and updates the shared cache. The CLI reads the normal
+global/project OpenCode config hierarchy; pass `--cache-dir=/path` to isolate
+its cache. Neither command requires an API key.
 
 ## Development
 
-### Project Structure
-
-```
-opencode-persistent-model-discovery/
-├── src/
-│   └── index.ts              # Main plugin code
-├── package.json              # Package manifest
-├── sync-models.mjs           # Manual sync script
-├── clean-config.mjs          # Config cleanup script
-└── README.md                 # This file
+```bash
+npm install
+npm run typecheck
+npm run typecheck:test
+npm test
+npm run build
 ```
 
-### Testing
+The repository also includes a minimal `Dockerfile` for running the test suite
+without installing host dependencies:
 
 ```bash
-# 1. Clean config
-node clean-config.mjs surplus
-
-# 2. Sync models
-node sync-models.mjs surplus
-
-# 3. Verify cache
-ls -la ~/.cache/opencode/models-surplus.json
-
-# 4. Test with opencode
-opencode run "test" -m surplus/claude-opus-4.8
+docker build -t opencode-surplus-test .
+docker run --rm opencode-surplus-test
 ```
 
-### Contributing
+## License and attribution
 
-1. Fork the repository
-2. Create a feature branch
-3. Make changes
-4. Test with `sync-models.mjs <provider>`
-5. Submit a pull request
-
-## Requirements
-
-- **OpenCode:** >= 1.2.0
-- **Node.js:** >= 18.0.0
-- **Provider:** OpenAI-compatible with `/v1/models` endpoint
-
-## License
-
-MIT License - see LICENSE file for details.
-
-## Related Projects
-
-- [opencode](https://opencode.ai) - The AI editor that this plugin extends
-- [opencode-models-discovery](https://github.com/yuhp/opencode-models-discovery) - The built-in discovery plugin that inspired this approach
-
-## Support
-
-- **Issues:** [GitHub Issues](https://github.com/lprzychodzien/opencode-persistent-model-discovery/issues)
-- **Discussions:** [GitHub Discussions](https://github.com/lprzychodzien/opencode-persistent-model-discovery/discussions)
-
----
-
-**Note for AI Agents:** This plugin solves a specific race condition in OpenCode's plugin architecture. The key implementation detail is the two-phase approach: synchronous cache loading (Phase 1) before provider resolution, followed by asynchronous API refresh (Phase 2) after startup. The cache file format is a simple JSON map of model IDs to `{id, name}` objects.
+This modified fork is licensed under the GNU General Public License v3.0-only.
+It is forked from
+[`lprzychodzien/opencode-persistent-model-discovery`](https://github.com/lprzychodzien/opencode-persistent-model-discovery).
+The original MIT notice and author attribution are preserved in
+[`LICENSE-MIT`](./LICENSE-MIT), and the upstream Git history is retained.

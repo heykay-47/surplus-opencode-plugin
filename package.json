@@ -1,27 +1,66 @@
 {
-  "name": "opencode-persistent-model-discovery",
-  "version": "0.1.0",
-  "description": "OpenCode plugin that persistently discovers and caches AI models from OpenAI-compatible providers",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "name": "opencode-surplus",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "Surplus provider integration for OpenCode V1 and V2 with persistent model inventory caching",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "opencode-surplus": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "LICENSE-MIT"
+  ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/lprzychodzien/opencode-persistent-model-discovery"
+    "url": "https://github.com/heykay-47/surplus-opencode-plugin"
   },
   "keywords": [
     "opencode",
     "opencode-plugin",
-    "model-discovery",
-    "openai-compatible",
+    "surplus",
+    "model-inventory",
     "ai-models"
   ],
   "author": "Lukasz Przychodzien",
-  "license": "MIT",
+  "contributors": [
+    "heykay-47"
+  ],
+  "license": "GPL-3.0-only",
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.0.0"
+    "@opencode-ai/plugin": ">=1.18.29 <2",
+    "@opencode/plugin": ">=2.0.0 <3"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": {
+      "optional": true
+    },
+    "@opencode/plugin": {
+      "optional": true
+    }
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "latest"
+    "@opencode-ai/plugin": "1.18.31",
+    "@opencode/plugin": "2.0.11",
+    "@types/node": "24.12.2",
+    "tsx": "4.20.6",
+    "typescript": "5.8.2"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "prepack": "npm run build"
   },
   "opencode": {
     "plugin": true
