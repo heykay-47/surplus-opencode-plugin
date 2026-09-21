@@ -150,5 +150,4 @@ docker run --rm opencode-surplus-test
 This modified fork is licensed under the GNU General Public License v3.0-only.
 It is forked from
 [`lprzychodzien/opencode-persistent-model-discovery`](https://github.com/lprzychodzien/opencode-persistent-model-discovery).
-The original MIT notice and author attribution are preserved in
-[`LICENSE-MIT`](./LICENSE-MIT), and the upstream Git history is retained.
+The upstream Git history and author attribution are retained.
