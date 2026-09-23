@@ -57,6 +57,25 @@ An empty `models` map intentionally leaves the Surplus provider loaded with
 zero models. A model missing from a valid catalog is hidden and logged. Manual
 model metadata wins over catalog metadata when both define the same property.
 
+### Interactive model picker
+
+The V2 TUI exposes **Select Surplus models** in the command palette and through
+the `/surplus-models` slash command. It refreshes the public Surplus catalog,
+provides searchable model names and IDs, supports multi-selection, and writes
+the exact selection to the active project's `providers.surplus.models` map.
+Cancel leaves the configuration unchanged; confirming with no models writes an
+empty map.
+
+For V1, use the version-neutral CLI picker. It uses the V1 native
+`provider.surplus.models` map when the V1 config is detected:
+
+```bash
+opencode-surplus pick --version=v1
+```
+
+Use `--version=v2` to force the V2 config shape. The picker never stores or
+requests an inference API key; catalog discovery remains public.
+
 Configure Surplus credentials through OpenCode's normal provider
 authentication. Catalog discovery is public and does not read or send the
 inference API key.
@@ -120,12 +139,15 @@ After installing the package, use the version-neutral CLI:
 ```bash
 opencode-surplus list
 opencode-surplus refresh
+opencode-surplus pick [--version=v1|v2]
 ```
 
 `list` shows the cached inventory and marks selected IDs. `refresh` performs one
-public catalog request and updates the shared cache. The CLI reads the normal
-global/project OpenCode config hierarchy; pass `--cache-dir=/path` to isolate
-its cache. Neither command requires an API key.
+public catalog request and updates the shared cache. `pick` opens a searchable
+terminal picker, refreshes the catalog, and writes the selected native model
+map to the active project config. The CLI reads the normal global/project
+OpenCode config hierarchy; pass `--cache-dir=/path` to isolate its cache.
+Neither command requires an API key.
 
 ## Development
 

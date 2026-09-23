@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
-import { promises as fs } from "node:fs"
-import os from "node:os"
+import { createInterface } from "node:readline/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import {
@@ -9,116 +8,16 @@ import {
   PLUGIN_ID,
   SurplusInventoryStore,
   configuredModelIds,
-  parseJsonc,
   type RuntimeOptions,
 } from "./core.js"
-
-function defaultConfigDir(): string {
-  return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "opencode")
-}
-
-function configDirs(): string[] {
-  const dirs = [defaultConfigDir()]
-  const configured = process.env.OPENCODE_CONFIG_DIR
-  if (configured && !dirs.includes(configured)) dirs.push(configured)
-  return dirs
-}
-
-function isRecord(value: unknown): value is Record<string, any> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function mergeConfig(base: Record<string, any>, next: Record<string, any>): Record<string, any> {
-  const merged: Record<string, any> = { ...base }
-  for (const [key, value] of Object.entries(next)) {
-    // A higher-precedence config's model map is an explicit selection contract;
-    // an empty map must not accidentally inherit global selections.
-    merged[key] =
-      key === "models" || !isRecord(merged[key]) || !isRecord(value) ? value : mergeConfig(merged[key], value)
-  }
-  return merged
-}
-
-async function projectRoots(): Promise<string[]> {
-  const roots: string[] = []
-  let current = path.resolve(process.cwd())
-  while (true) {
-    roots.unshift(current)
-    try {
-      await fs.stat(path.join(current, ".git"))
-      return roots
-    } catch {
-      // Continue to the next parent when this is not a repository root.
-    }
-    const parent = path.dirname(current)
-    if (parent === current) return roots
-    current = parent
-  }
-}
-
-async function readConfigFromRoot(root: string): Promise<Record<string, any> | undefined> {
-  const files = [
-    path.join(root, "opencode.jsonc"),
-    path.join(root, "opencode.json"),
-    path.join(root, ".opencode", "opencode.jsonc"),
-    path.join(root, ".opencode", "opencode.json"),
-  ]
-  for (const file of files) {
-    try {
-      return parseJsonc(await fs.readFile(file, "utf8")) as Record<string, any>
-    } catch {
-      // Try the next supported OpenCode config filename.
-    }
-  }
-  return undefined
-}
-
-async function readConfig(): Promise<Record<string, any>> {
-  let config: Record<string, any> = {}
-  const globalRoots = configDirs()
-  const projectConfigRoots = await projectRoots()
-  const seen = new Set<string>()
-  const mergeRoot = async (root: string) => {
-    if (seen.has(root)) return
-    seen.add(root)
-    const parsed = await readConfigFromRoot(root)
-    if (parsed) config = mergeConfig(config, parsed)
-  }
-
-  for (const root of globalRoots) await mergeRoot(root)
-
-  const explicit = process.env.OPENCODE_CONFIG
-  if (explicit) {
-    try {
-      const file = path.resolve(process.cwd(), explicit)
-      const parsed = parseJsonc(await fs.readFile(file, "utf8")) as Record<string, any>
-      config = mergeConfig(config, parsed)
-    } catch {
-      // An unavailable explicit file is treated like an unavailable config source.
-    }
-  }
-
-  for (const root of projectConfigRoots) await mergeRoot(root)
-  return config
-}
-
-function providerConfig(config: Record<string, any>): Record<string, any> {
-  return mergeConfig(config.provider?.surplus || {}, config.providers?.surplus || {})
-}
-
-function pluginOptions(config: Record<string, any>): Record<string, any> {
-  const entries = [
-    ...(Array.isArray(config.plugin) ? config.plugin : []),
-    ...(Array.isArray(config.plugins) ? config.plugins : []),
-  ]
-  for (const entry of entries) {
-    const packageName = typeof entry === "string" ? entry : Array.isArray(entry) ? entry[0] : entry?.package
-    if (packageName !== PLUGIN_ID) continue
-    const options = Array.isArray(entry) ? entry[1] : entry?.options
-    return options && typeof options === "object" ? options : {}
-  }
-  return {}
-}
+import {
+  inferConfigFlavor,
+  pluginOptions,
+  providerConfig,
+  readConfig,
+  writeModelSelection,
+} from "./config.js"
+import { filterCatalogModels, modelDescription } from "./picker.js"
 
 function runtimeOptions(config: Record<string, any>, args: string[]): RuntimeOptions {
   const provider = providerConfig(config)
@@ -135,8 +34,8 @@ function runtimeOptions(config: Record<string, any>, args: string[]): RuntimeOpt
 
 export async function runCli(args: string[], output = console): Promise<number> {
   const command = args[0]
-  if (command !== "list" && command !== "refresh") {
-    output.error("Usage: opencode-surplus <list|refresh> [--cache-dir=/path]")
+  if (command !== "list" && command !== "refresh" && command !== "pick") {
+    output.error("Usage: opencode-surplus <list|refresh|pick> [--cache-dir=/path] [--version=v1|v2]")
     return 1
   }
 
@@ -154,6 +53,32 @@ export async function runCli(args: string[], output = console): Promise<number> 
     return 0
   }
 
+  if (command === "pick") {
+    const requestedVersion = args.find((arg) => arg.startsWith("--version="))?.slice("--version=".length)
+    if (requestedVersion && requestedVersion !== "v1" && requestedVersion !== "v2") {
+      output.error("--version must be v1 or v2")
+      return 1
+    }
+    const cached = await store.load()
+    const refreshed = await store.refresh()
+    const inventory = refreshed.status === "updated" ? refreshed.inventory : cached
+    if (!inventory) {
+      output.error("Could not load the Surplus model catalog.")
+      return 1
+    }
+
+    const initial = configuredModelIds(providerConfig(config).models)
+    const selected = await interactiveSelection(inventory.models, initial, output)
+    if (selected === undefined) {
+      output.log("Selection cancelled.")
+      return 0
+    }
+
+    const result = await writeModelSelection(process.cwd(), selected, inferConfigFlavor(config, requestedVersion))
+    output.log(`Saved ${selected.length} Surplus model${selected.length === 1 ? "" : "s"} to ${result.file}.`)
+    return 0
+  }
+
   const inventory = await store.load()
   if (!inventory) {
     output.log("No cached Surplus inventory. Run: opencode-surplus refresh")
@@ -166,6 +91,43 @@ export async function runCli(args: string[], output = console): Promise<number> 
     output.log(`${model.id}\t${model.name}\t${selected.has(model.id) ? "yes" : "no"}`)
   }
   return 0
+}
+
+async function interactiveSelection(
+  models: import("./core.js").CatalogModel[],
+  initial: string[],
+  output: Pick<Console, "log">,
+): Promise<string[] | undefined> {
+  const input = createInterface({ input: process.stdin, output: process.stdout })
+  const available = new Set(models.map((model) => model.id))
+  const selected = new Set(initial.filter((id) => available.has(id)))
+  try {
+    while (true) {
+      const query = await input.question('Search Surplus models (type "q" to cancel): ')
+      if (query.trim().toLowerCase() === "q") return undefined
+      const matches = filterCatalogModels(models, query).slice(0, 100)
+      output.log(matches.length === 0 ? "No matching models." : "")
+      matches.forEach((model, index) => {
+        output.log(`${index + 1}. ${selected.has(model.id) ? "[x]" : "[ ]"} ${model.name} — ${model.id} (${modelDescription(model)})`)
+      })
+      const answer = await input.question('Toggle numbers or IDs (comma-separated), "clear", or "done": ')
+      const normalized = answer.trim().toLowerCase()
+      if (normalized === "done") return [...selected]
+      if (normalized === "clear") {
+        selected.clear()
+        continue
+      }
+      for (const token of answer.split(",").map((item) => item.trim()).filter(Boolean)) {
+        const index = Number(token)
+        const model = Number.isInteger(index) && index > 0 && index <= matches.length ? matches[index - 1] : models.find((item) => item.id === token)
+        if (!model) continue
+        if (selected.has(model.id)) selected.delete(model.id)
+        else selected.add(model.id)
+      }
+    }
+  } finally {
+    input.close()
+  }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

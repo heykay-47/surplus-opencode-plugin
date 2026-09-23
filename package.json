@@ -1,6 +1,6 @@
 {
   "name": "opencode-surplus",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "Surplus provider integration for OpenCode V1 and V2 with persistent model inventory caching",
   "main": "dist/index.js",
@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
     }
   },
   "bin": {
