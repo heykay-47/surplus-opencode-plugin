@@ -29,14 +29,13 @@ export async function writeFileAtomically(
   file: string,
   content: string,
   fileSystem: AtomicFileSystem = atomicFileSystem,
-  createMode = 0o600,
 ): Promise<void> {
   const directory = path.dirname(file)
   await fileSystem.mkdir(directory, { recursive: true })
 
-  let mode = createMode
+  let targetMode = 0o600
   try {
-    mode = (await fileSystem.stat(file)).mode & 0o777
+    targetMode = (await fileSystem.stat(file)).mode & 0o777
   } catch (error) {
     if (errorCode(error) !== "ENOENT") throw error
   }
@@ -45,15 +44,16 @@ export async function writeFileAtomically(
   let handle: FileHandle | undefined
   let created = false
   try {
-    handle = await fileSystem.open(temporary, "wx", mode)
+    handle = await fileSystem.open(temporary, "wx", 0o600)
     created = true
-    await handle.chmod(mode)
+    await handle.chmod(0o600)
     await handle.writeFile(content, "utf8")
     await handle.sync()
-    await handle.close()
-    handle = undefined
     await fileSystem.rename(temporary, file)
     created = false
+    if (targetMode !== 0o600) await handle.chmod(targetMode)
+    await handle.close()
+    handle = undefined
   } catch (error) {
     const cleanupErrors: unknown[] = []
     if (handle) {

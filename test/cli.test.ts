@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import os from "node:os"
@@ -137,20 +138,18 @@ test("CLI pick displays hostile fields safely and persists the selected ID uncha
   const unsafeId = "model-\u001b[31mred\r\n\t\u202e"
   const unsafeName = "name-\u009b2J\r\n\t\u2066"
   const unsafeProvider = "provider-\u001b]0;hostile\u0007"
-  const prompts = ["", "1", "", "done"]
-  const logs: string[] = []
+  let child: ChildProcessWithoutNullStreams | undefined
+  let output = ""
+  let errorOutput = ""
+  let cursor = 0
+  let exitCode: number | null | undefined
+  let notifyWaiters: () => void = () => {}
   let requestedPath = ""
   const server = createServer((request, response) => {
     requestedPath = request.url || ""
     response.setHeader("content-type", "application/json")
     response.end(JSON.stringify({ data: [{ id: unsafeId, name: unsafeName, provider: unsafeProvider }] }))
   })
-  const previous = {
-    cwd: process.cwd(),
-    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
-    OPENCODE_CONFIG_DIR: process.env.OPENCODE_CONFIG_DIR,
-    OPENCODE_CONFIG: process.env.OPENCODE_CONFIG,
-  }
 
   try {
     await mkdir(path.join(root, ".git"))
@@ -162,43 +161,95 @@ test("CLI pick displays hostile fields safely and persists the selected ID uncha
     assert.ok(address && typeof address !== "string")
     const endpoint = `http://127.0.0.1:${address.port}/private-path?token=query-secret`
     await writeFile(projectConfig, JSON.stringify({ providers: { surplus: { settings: { baseURL: endpoint }, models: {} } } }))
-    process.chdir(root)
-    process.env.XDG_CONFIG_HOME = path.join(root, "xdg")
-    delete process.env.OPENCODE_CONFIG_DIR
-    delete process.env.OPENCODE_CONFIG
-    const output = {
-      log: (message: unknown) => logs.push(String(message)),
-      error: (message: unknown) => logs.push(`ERROR: ${String(message)}`),
-    } as unknown as Console
-    const prompt = async () => prompts.shift() ?? "q"
+    const childEnvironment: NodeJS.ProcessEnv = {
+      ...process.env,
+      XDG_CONFIG_HOME: path.join(root, "xdg"),
+    }
+    delete childEnvironment.OPENCODE_CONFIG_DIR
+    delete childEnvironment.OPENCODE_CONFIG
+    const childClosed = new Promise<number | null>((resolve) => {
+      const spawned = spawn(process.execPath, [
+        "--import",
+        import.meta.resolve("tsx"),
+        path.resolve("src/cli.ts"),
+        "pick",
+        "--version=v2",
+        `--cache-dir=${cacheDir}`,
+      ], { cwd: root, env: childEnvironment, stdio: "pipe" })
+      child = spawned
+      spawned.stdout.setEncoding("utf8")
+      spawned.stderr.setEncoding("utf8")
+      spawned.stdout.on("data", (chunk: string) => {
+        output += chunk
+        notifyWaiters()
+      })
+      spawned.stderr.on("data", (chunk: string) => {
+        errorOutput += chunk
+        notifyWaiters()
+      })
+      spawned.once("error", (error) => {
+        errorOutput += `${error}`
+        exitCode = -1
+        notifyWaiters()
+      })
+      spawned.once("close", (code) => {
+        exitCode = code
+        notifyWaiters()
+        resolve(code)
+      })
+    })
+    const waitFor = async (marker: string) => {
+      const deadline = Date.now() + 15_000
+      while (Date.now() < deadline) {
+        const index = output.indexOf(marker, cursor)
+        if (index >= 0) {
+          cursor = index + marker.length
+          return
+        }
+        if (exitCode !== undefined) break
+        await new Promise<void>((resolve) => {
+          notifyWaiters = resolve
+        })
+        notifyWaiters = () => undefined
+      }
+      throw new Error(`CLI did not prompt for ${JSON.stringify(marker)}. Exit=${exitCode}; stdout=${output}; stderr=${errorOutput}`)
+    }
 
-    assert.equal(await runCli(["pick", "--version=v2", `--cache-dir=${cacheDir}`], output, prompt), 0)
+    await waitFor("Search Surplus models")
+    const interactiveChild = child
+    assert.ok(interactiveChild)
+    interactiveChild.stdin.write("\n")
+    await waitFor("Toggle numbers or IDs")
+    interactiveChild.stdin.write("1\n")
+    await waitFor("Search Surplus models")
+    interactiveChild.stdin.write("\n")
+    await waitFor("Toggle numbers or IDs")
+    interactiveChild.stdin.end("done\n")
+    assert.equal(await childClosed, 0, errorOutput)
 
     assert.equal(requestedPath, "/private-path/models?token=query-secret")
     const saved = parseJsonc(await readFile(projectConfig, "utf8")) as any
     const selectedId = Object.keys(saved.providers.surplus.models)[0]
     assert.equal(selectedId, unsafeId)
     assert.deepEqual(Buffer.from(selectedId), Buffer.from(unsafeId))
-    assert.ok(logs.some((line) => line.includes("model-\\x1b[31mred\\r\\n\\t\\u202e")))
-    assert.ok(logs.some((line) => line.includes("name-\\x9b2J\\r\\n\\t\\u2066")))
-    assert.ok(logs.some((line) => line.includes("provider-\\x1b]0;hostile\\x07")))
-    assert.equal(logs.join("\n").includes("\u001b"), false)
-    assert.equal(logs.join("\n").includes("\u009b"), false)
-    assert.equal(logs.join("\n").includes("\u202e"), false)
-    assert.equal(logs.join("\n").includes("\u2066"), false)
-    assert.equal(logs.join("\n").includes("private-path"), false)
-    assert.equal(logs.join("\n").includes("query-secret"), false)
+    assert.ok(output.includes("model-\\x1b[31mred\\r\\n\\t\\u202e"))
+    assert.ok(output.includes("name-\\x9b2J\\r\\n\\t\\u2066"))
+    assert.ok(output.includes("provider-\\x1b]0;hostile\\x07"))
+    assert.equal(output.includes("\u001b"), false)
+    assert.equal(output.includes("\u009b"), false)
+    assert.equal(output.includes("\u202e"), false)
+    assert.equal(output.includes("\u2066"), false)
+    assert.equal(output.includes("private-path"), false)
+    assert.equal(output.includes("query-secret"), false)
     const persistedCache = await readFile(path.join(cacheDir, "surplus-models.json"), "utf8")
     assert.equal(persistedCache.includes("private-path"), false)
     assert.equal(persistedCache.includes("query-secret"), false)
   } finally {
-    process.chdir(previous.cwd)
-    for (const [key, value] of Object.entries(previous)) {
-      if (key === "cwd") continue
-      if (value === undefined) delete process.env[key]
-      else process.env[key] = value
+    if (child && child.exitCode === null) {
+      child.kill()
+      await new Promise<void>((resolve) => child?.once("close", () => resolve()))
     }
-    await new Promise<void>((resolve) => server.close(() => resolve()))
+    if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
   }
 })

@@ -19,6 +19,22 @@ import {
   toV2Model,
 } from "../src/core.js"
 
+const legacyEndpoint = "https://proxy.example/private-path-secret?token=query-secret"
+const legacyEndpointMetadata = "https://proxy.example/private-path-secret"
+const legacyEndpointKey = `${legacyEndpointMetadata}#query-${createHash("sha256").update("?token=query-secret").digest("hex").slice(0, 16)}`
+
+function legacyCachePayload(): string {
+  return JSON.stringify({
+    version: 2,
+    provider: "surplus",
+    endpoint: legacyEndpointMetadata,
+    endpointKey: legacyEndpointKey,
+    account: "public",
+    fetchedAt: 1_000,
+    models: [{ id: "cached-model", name: "Cached model" }],
+  })
+}
+
 test("catalog parsing filters malformed entries and preserves rich metadata", () => {
   const result = parseCatalogPayload({
     data: [
@@ -226,27 +242,15 @@ test("same-origin custom endpoints with different paths and queries do not reuse
 
 test("a prior canonical cache with a raw endpoint path is migrated on load", async () => {
   const cacheDir = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-cache-migrate-"))
-  const endpoint = "https://proxy.example/private-path-secret?token=query-secret"
-  const oldEndpoint = "https://proxy.example/private-path-secret"
-  const oldQueryHash = createHash("sha256").update("?token=query-secret").digest("hex").slice(0, 16)
-  const oldEndpointKey = `${oldEndpoint}#query-${oldQueryHash}`
   const cacheFile = path.join(cacheDir, "surplus-models.json")
   try {
-    await writeFile(cacheFile, JSON.stringify({
-      version: 2,
-      provider: "surplus",
-      endpoint: oldEndpoint,
-      endpointKey: oldEndpointKey,
-      account: "public",
-      fetchedAt: 1_000,
-      models: [{ id: "cached-model", name: "Cached model" }],
-    }))
-    const store = new SurplusInventoryStore({ endpoint, cacheDir, now: () => 2_000 })
+    await writeFile(cacheFile, legacyCachePayload())
+    const store = new SurplusInventoryStore({ endpoint: legacyEndpoint, cacheDir, now: () => 2_000 })
 
     const inventory = await store.load()
     assert.equal(inventory?.models[0]?.id, "cached-model")
     assert.equal(inventory?.endpoint, "https://proxy.example")
-    assert.equal(inventory?.endpointKey, endpointCacheKey(endpoint))
+    assert.equal(inventory?.endpointKey, endpointCacheKey(legacyEndpoint))
     const rewritten = await readFile(cacheFile, "utf8")
     assert.equal(rewritten.includes("private-path-secret"), false)
     assert.equal(rewritten.includes("query-secret"), false)
@@ -258,19 +262,8 @@ test("a prior canonical cache with a raw endpoint path is migrated on load", asy
 
 test("a failed prior-cache rewrite keeps inventory and warns without exposing endpoint components", async () => {
   const cacheDir = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-cache-migrate-fail-"))
-  const endpoint = "https://proxy.example/private-path-secret?token=query-secret"
-  const oldEndpoint = "https://proxy.example/private-path-secret"
-  const oldQueryHash = createHash("sha256").update("?token=query-secret").digest("hex").slice(0, 16)
   const cacheFile = path.join(cacheDir, "surplus-models.json")
-  const oldCache = JSON.stringify({
-    version: 2,
-    provider: "surplus",
-    endpoint: oldEndpoint,
-    endpointKey: `${oldEndpoint}#query-${oldQueryHash}`,
-    account: "public",
-    fetchedAt: 1_000,
-    models: [{ id: "cached-model", name: "Cached model" }],
-  })
+  const oldCache = legacyCachePayload()
   const warnings: string[] = []
   try {
     await writeFile(cacheFile, oldCache)
@@ -282,7 +275,7 @@ test("a failed prior-cache rewrite keeps inventory and warns without exposing en
       },
     }
     const store = new SurplusInventoryStore({
-      endpoint,
+      endpoint: legacyEndpoint,
       cacheDir,
       fileSystem,
       warn: (message) => {

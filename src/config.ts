@@ -216,6 +216,6 @@ export async function writeModelSelection(
   root.surplus = provider
   target.config[rootKey] = root
 
-  await writeFileAtomically(target.file, `${JSON.stringify(target.config, null, 2)}\n`, fileSystem, 0o600)
+  await writeFileAtomically(target.file, `${JSON.stringify(target.config, null, 2)}\n`, fileSystem)
   return { file: target.file, flavor, ids: [...ids] }
 }

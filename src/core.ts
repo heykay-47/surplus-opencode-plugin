@@ -338,7 +338,7 @@ export function getLegacyCacheFile(cacheDir = getCacheDir()): string {
 }
 
 async function writeCanonicalCache(fileSystem: FileSystemLike, file: string, inventory: Inventory): Promise<void> {
-  await writeFileAtomically(file, `${JSON.stringify(inventory, null, 2)}\n`, fileSystem, 0o600)
+  await writeFileAtomically(file, `${JSON.stringify(inventory, null, 2)}\n`, fileSystem)
 }
 
 export class SurplusInventoryStore {

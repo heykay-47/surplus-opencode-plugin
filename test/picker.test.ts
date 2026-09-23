@@ -85,6 +85,31 @@ test("picker preserves private config modes and creates new configs as owner-onl
   }
 })
 
+test("picker keeps a replacement temporary file private before restoring the existing mode", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-picker-temp-mode-"))
+  const config = path.join(root, "opencode.json")
+  let temporaryMode: number | undefined
+  try {
+    await mkdir(path.join(root, ".git"))
+    await writeFile(config, JSON.stringify({ auth: { token: "synthetic-config-secret" }, provider: { surplus: { models: {} } } }), { mode: 0o640 })
+    const fileSystem = {
+      ...atomicFileSystem,
+      rename: async (temporary: string, target: string) => {
+        temporaryMode = (await stat(temporary)).mode & 0o777
+        await atomicFileSystem.rename(temporary, target)
+      },
+    }
+
+    await writeModelSelection(root, ["surplus-a"], "v1", fileSystem)
+
+    assert.equal(temporaryMode, 0o600)
+    assert.equal((await stat(config)).mode & 0o777, 0o640)
+    assert.equal((parseJsonc(await readFile(config, "utf8")) as any).auth.token, "synthetic-config-secret")
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test("picker failures leave the original config intact and remove its temporary file", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-picker-failure-"))
   const config = path.join(root, "opencode.json")
