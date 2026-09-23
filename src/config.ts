@@ -196,6 +196,7 @@ export interface ModelSelectionWriteResult {
   file: string
   flavor: ConfigFlavor
   ids: string[]
+  permissionsPreserved: boolean
 }
 
 export async function writeModelSelection(
@@ -216,6 +217,6 @@ export async function writeModelSelection(
   root.surplus = provider
   target.config[rootKey] = root
 
-  await writeFileAtomically(target.file, `${JSON.stringify(target.config, null, 2)}\n`, fileSystem)
-  return { file: target.file, flavor, ids: [...ids] }
+  const permissionsPreserved = await writeFileAtomically(target.file, `${JSON.stringify(target.config, null, 2)}\n`, fileSystem)
+  return { file: target.file, flavor, ids: [...ids], permissionsPreserved }
 }

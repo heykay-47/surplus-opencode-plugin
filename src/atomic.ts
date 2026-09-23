@@ -29,7 +29,7 @@ export async function writeFileAtomically(
   file: string,
   content: string,
   fileSystem: AtomicFileSystem = atomicFileSystem,
-): Promise<void> {
+): Promise<boolean> {
   const directory = path.dirname(file)
   await fileSystem.mkdir(directory, { recursive: true })
 
@@ -44,16 +44,31 @@ export async function writeFileAtomically(
   let handle: FileHandle | undefined
   let created = false
   try {
-    handle = await fileSystem.open(temporary, "wx", 0o600)
+    const temporaryHandle = await fileSystem.open(temporary, "wx", 0o600)
+    handle = temporaryHandle
     created = true
-    await handle.chmod(0o600)
-    await handle.writeFile(content, "utf8")
-    await handle.sync()
+    await temporaryHandle.chmod(0o600)
+    await temporaryHandle.writeFile(content, "utf8")
+    await temporaryHandle.sync()
     await fileSystem.rename(temporary, file)
     created = false
-    if (targetMode !== 0o600) await handle.chmod(targetMode)
-    await handle.close()
+    let permissionsPreserved = true
+    if (targetMode !== 0o600) {
+      try {
+        await temporaryHandle.chmod(targetMode)
+      } catch {
+        // The replacement is committed. Keep the safer private mode and report
+        // that the existing mode could not be restored instead of failing late.
+        permissionsPreserved = false
+      }
+    }
+    try {
+      await temporaryHandle.close()
+    } catch {
+      // The replacement is committed; close errors must not make it look unsaved.
+    }
     handle = undefined
+    return permissionsPreserved
   } catch (error) {
     const cleanupErrors: unknown[] = []
     if (handle) {

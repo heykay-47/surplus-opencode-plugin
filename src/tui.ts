@@ -136,10 +136,13 @@ async function openPicker(context: TuiContext): Promise<void> {
     const result = await writeModelSelection(directory, selected, "v2")
     context.data?.location?.provider?.invalidate?.(context.location)
     context.data?.location?.model?.invalidate?.(context.location)
+    const permissionNotice = result.permissionsPreserved
+      ? ""
+      : " Previous permissions could not be restored; the saved config remains owner-only."
     context.ui.toast.show({
       variant: "success",
       title: "Surplus models saved",
-      message: `${selected.length} model${selected.length === 1 ? "" : "s"} saved to ${result.file}. Restart OpenCode if the provider list does not update automatically.`,
+      message: `${selected.length} model${selected.length === 1 ? "" : "s"} saved to ${result.file}.${permissionNotice} Restart OpenCode if the provider list does not update automatically.`,
     })
   } catch (error) {
     context.ui.toast.show({

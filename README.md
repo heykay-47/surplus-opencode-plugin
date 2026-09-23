@@ -137,7 +137,9 @@ cache on the next startup.
 Picker saves write a same-directory temporary file opened exclusively with an
 unpredictable name. On POSIX systems, existing config permission bits are
 retained and newly created configs use owner-only mode (`0600`). Failed writes
-leave the existing config in place.
+before replacement leave the existing config in place. If the prior mode cannot
+be restored after a successful replacement, the save is reported as successful
+with the safer owner-only mode retained.
 
 The full normalized endpoint, including its path and query, determines cache
 identity so separate proxies cannot share an inventory. Cache metadata and logs
@@ -145,11 +147,10 @@ contain the origin and an opaque fingerprint, not the configured path, query,
 user information, or fragment. When loading an older canonical cache with a raw
 path, the integration keeps its inventory available and attempts a secure
 rewrite. If rewriting fails, it warns that the old disk cache may still contain
-endpoint details;
-remove `surplus-models.json` from the configured cache directory (or
-`~/.cache/opencode/`) manually if the warning persists. Remove any other old
-cache files from former cache directories manually; the integration does not
-scan or rewrite caches it never loads.
+endpoint details. Remove `surplus-models.json` from the configured cache
+directory (or `~/.cache/opencode/`) manually if the warning persists. Remove
+any other old cache files from former cache directories manually; the
+integration does not scan or rewrite caches it never loads.
 
 CI fails when the production dependency tree has an npm advisory. It also
 reports the full dependency audit, including development dependencies, as an

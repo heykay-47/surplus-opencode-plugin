@@ -110,6 +110,36 @@ test("picker keeps a replacement temporary file private before restoring the exi
   }
 })
 
+test("picker does not report failure after replacement if prior mode restoration fails", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-picker-mode-fail-"))
+  const config = path.join(root, "opencode.json")
+  try {
+    await mkdir(path.join(root, ".git"))
+    await writeFile(config, JSON.stringify({ provider: { surplus: { models: { original: {} } } } }), { mode: 0o640 })
+    const fileSystem = {
+      ...atomicFileSystem,
+      open: async (file: string, flags: "wx", mode: number) => {
+        const handle = await atomicFileSystem.open(file, flags, mode)
+        const chmod = handle.chmod.bind(handle)
+        handle.chmod = async (requestedMode: number) => {
+          if (requestedMode === 0o640) throw new Error("fixture chmod failure")
+          await chmod(requestedMode)
+        }
+        return handle
+      },
+    }
+
+    const result = await writeModelSelection(root, ["replacement"], "v1", fileSystem)
+
+    assert.equal(result.permissionsPreserved, false)
+    assert.equal((await stat(config)).mode & 0o777, 0o600)
+    assert.deepEqual(Object.keys((parseJsonc(await readFile(config, "utf8")) as any).provider.surplus.models), ["replacement"])
+    assert.deepEqual((await readdir(root)).filter((name) => name.endsWith(".tmp")), [])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test("picker failures leave the original config intact and remove its temporary file", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-picker-failure-"))
   const config = path.join(root, "opencode.json")

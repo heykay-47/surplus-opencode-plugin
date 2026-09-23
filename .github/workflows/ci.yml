@@ -24,6 +24,7 @@ jobs:
       - name: Fail on production dependency advisories
         run: npm audit --omit=dev
       - name: Report the full dependency tree, including development tools
+        if: always()
         continue-on-error: true
         run: npm audit --audit-level=low
 
