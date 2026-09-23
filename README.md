@@ -134,8 +134,10 @@ cache on the next startup.
 
 ## Security and dependency monitoring
 
-Picker saves write a same-directory temporary file opened exclusively with an
-unpredictable name. On POSIX systems, existing config permission bits are
+Picker and cache saves write a same-directory temporary file opened exclusively
+with an unpredictable name. On POSIX systems, atomic writes reject destination
+paths that traverse group- or world-writable directories unless sticky-directory
+ownership protects the temporary entry. Existing config permission bits are
 retained and newly created configs use owner-only mode (`0600`). Failed writes
 before replacement leave the existing config in place. If the prior mode cannot
 be restored after a successful replacement, the save is reported as successful

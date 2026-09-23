@@ -189,6 +189,36 @@ test("picker temporary creation refuses a pre-planted symlink", async () => {
   }
 })
 
+test("picker refuses directories where another user can replace temporary files", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-picker-shared-dir-"))
+  const project = path.join(root, "private-project")
+  const config = path.join(project, "opencode.json")
+  const original = JSON.stringify({ provider: { surplus: { models: { original: {} } } } })
+  let openAttempted = false
+  try {
+    await mkdir(path.join(project, ".git"), { recursive: true })
+    await writeFile(config, original)
+    const fileSystem = {
+      ...atomicFileSystem,
+      stat: async (file: string) => file === root
+        ? { mode: 0o777, uid: (process.getuid?.() ?? 0) + 1 }
+        : atomicFileSystem.stat(file),
+      open: async (file: string, flags: "wx", mode: number) => {
+        openAttempted = true
+        return atomicFileSystem.open(file, flags, mode)
+      },
+    }
+
+    await assert.rejects(writeModelSelection(project, ["replacement"], "v1", fileSystem), /group- or world-writable/)
+
+    assert.equal(openAttempted, false)
+    assert.equal(await readFile(config, "utf8"), original)
+    assert.deepEqual((await readdir(project)).filter((name) => name.endsWith(".tmp")), [])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test("picker infers V1 and V2 config generations", () => {
   assert.equal(inferConfigFlavor({ provider: {} }), "v1")
   assert.equal(inferConfigFlavor({ plugin: [] }), "v1")

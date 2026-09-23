@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
-import { mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import os from "node:os"
 import path from "node:path"
@@ -326,6 +326,44 @@ test("cache temporary creation refuses a pre-planted symlink", async () => {
   } finally {
     if (plantedLink) await unlink(plantedLink)
     await rm(cacheDir, { recursive: true, force: true })
+  }
+})
+
+test("cache refuses directories where another user can replace temporary files", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-cache-shared-dir-"))
+  const cacheDir = path.join(parent, "private-cache")
+  const protectedFile = path.join(cacheDir, "protected.txt")
+  let openAttempted = false
+  try {
+    await mkdir(cacheDir)
+    await writeFile(protectedFile, "must remain unchanged")
+    const fileSystem = {
+      ...atomicFileSystem,
+      readFile: (file: string, encoding: "utf8") => readFile(file, encoding),
+      stat: async (file: string) => file === parent
+        ? { mode: 0o777, uid: (process.getuid?.() ?? 0) + 1 }
+        : atomicFileSystem.stat(file),
+      open: async (file: string, flags: "wx", mode: number) => {
+        openAttempted = true
+        return atomicFileSystem.open(file, flags, mode)
+      },
+    }
+    const store = new SurplusInventoryStore({
+      cacheDir,
+      fileSystem,
+      fetcher: async () => new Response(JSON.stringify({ data: [{ id: "surplus-a" }] }), { status: 200 }),
+      now: () => 1_000,
+    })
+
+    const result = await store.refresh()
+
+    assert.equal(result.status, "updated")
+    assert.equal(result.inventory?.models[0]?.id, "surplus-a")
+    assert.equal(openAttempted, false)
+    assert.equal(await readFile(protectedFile, "utf8"), "must remain unchanged")
+    assert.equal((await readdir(cacheDir)).some((name) => name === "surplus-models.json"), false)
+  } finally {
+    await rm(parent, { recursive: true, force: true })
   }
 })
 

@@ -4,8 +4,9 @@ import type { FileHandle } from "node:fs/promises"
 import path from "node:path"
 
 export interface AtomicFileSystem {
-  mkdir(directory: string, options: { recursive: true }): Promise<unknown>
-  stat(file: string): Promise<{ mode: number }>
+  mkdir(directory: string, options: { recursive: true; mode: number }): Promise<unknown>
+  realpath(file: string): Promise<string>
+  stat(file: string): Promise<{ mode: number; uid: number }>
   open(file: string, flags: "wx", mode: number): Promise<FileHandle>
   rename(from: string, to: string): Promise<void>
   unlink(file: string): Promise<void>
@@ -13,6 +14,7 @@ export interface AtomicFileSystem {
 
 export const atomicFileSystem: AtomicFileSystem = {
   mkdir: (directory, options) => fs.mkdir(directory, options),
+  realpath: (file) => fs.realpath(file),
   stat: (file) => fs.stat(file),
   open: (file, flags, mode) => fs.open(file, flags, mode),
   rename: (from, to) => fs.rename(from, to),
@@ -25,13 +27,42 @@ function errorCode(error: unknown): string | undefined {
     : undefined
 }
 
+function isProtectedDirectory(directory: { mode: number; uid: number }): boolean {
+  if (typeof process.getuid !== "function" || (directory.mode & 0o022) === 0) return true
+  const hasStickyBit = (directory.mode & 0o1000) !== 0
+  return hasStickyBit && (directory.uid === 0 || directory.uid === process.getuid())
+}
+
+async function assertProtectedPath(directory: string, fileSystem: AtomicFileSystem): Promise<void> {
+  const checked = new Set<string>()
+  const checkAncestors = async (start: string) => {
+    let current = start
+    while (true) {
+      if (!checked.has(current)) {
+        const info = await fileSystem.stat(current)
+        if (!isProtectedDirectory(info)) {
+          throw new Error("Refusing atomic write in a group- or world-writable directory without sticky protection")
+        }
+        checked.add(current)
+      }
+      const parent = path.dirname(current)
+      if (parent === current) return
+      current = parent
+    }
+  }
+
+  await checkAncestors(path.resolve(directory))
+  await checkAncestors(await fileSystem.realpath(directory))
+}
+
 export async function writeFileAtomically(
   file: string,
   content: string,
   fileSystem: AtomicFileSystem = atomicFileSystem,
 ): Promise<boolean> {
   const directory = path.dirname(file)
-  await fileSystem.mkdir(directory, { recursive: true })
+  await fileSystem.mkdir(directory, { recursive: true, mode: 0o700 })
+  await assertProtectedPath(directory, fileSystem)
 
   let targetMode = 0o600
   try {
