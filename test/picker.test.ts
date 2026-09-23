@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
@@ -59,15 +59,18 @@ test("picker writes the selected native V2 model map and supports V1 override", 
 test("picker preserves private config modes and creates new configs as owner-only", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-picker-mode-"))
   const previous = process.env.OPENCODE_CONFIG
+  const previousUmask = process.umask(0o022)
   const config = path.join(root, "opencode.json")
   try {
+    await chmod(root, 0o755)
     await mkdir(path.join(root, ".git"))
-    await writeFile(config, JSON.stringify({ provider: { surplus: { models: {} } } }), { mode: 0o600 })
+    await writeFile(config, JSON.stringify({ auth: { token: "synthetic-config-secret" }, provider: { surplus: { models: {} } } }), { mode: 0o600 })
 
     await writeModelSelection(root, ["surplus-v1"], "v1")
     assert.equal((await stat(config)).mode & 0o777, 0o600)
     await writeModelSelection(root, ["surplus-v2"], "v2")
     assert.equal((await stat(config)).mode & 0o777, 0o600)
+    assert.equal((parseJsonc(await readFile(config, "utf8")) as any).auth.token, "synthetic-config-secret")
 
     const newConfig = path.join(root, "new-config.json")
     process.env.OPENCODE_CONFIG = newConfig
@@ -75,6 +78,7 @@ test("picker preserves private config modes and creates new configs as owner-onl
     assert.equal((await stat(newConfig)).mode & 0o777, 0o600)
     assert.deepEqual(Object.keys((parseJsonc(await readFile(newConfig, "utf8")) as any).providers.surplus.models), ["surplus-new"])
   } finally {
+    process.umask(previousUmask)
     if (previous === undefined) delete process.env.OPENCODE_CONFIG
     else process.env.OPENCODE_CONFIG = previous
     await rm(root, { recursive: true, force: true })
