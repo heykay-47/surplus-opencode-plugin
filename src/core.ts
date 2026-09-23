@@ -2,6 +2,7 @@ import { promises as nodeFs } from "node:fs"
 import { createHash } from "node:crypto"
 import os from "node:os"
 import path from "node:path"
+import { atomicFileSystem, writeFileAtomically, type AtomicFileSystem } from "./atomic.js"
 
 export const PLUGIN_ID = "opencode-surplus"
 export const PROVIDER_ID = "surplus"
@@ -60,11 +61,8 @@ export interface RuntimeOptions {
   now?: () => number
 }
 
-export interface FileSystemLike {
+export interface FileSystemLike extends AtomicFileSystem {
   readFile(file: string, encoding: "utf8"): Promise<string>
-  writeFile(file: string, data: string, encoding: "utf8"): Promise<void>
-  mkdir(directory: string, options: { recursive: true }): Promise<string | undefined>
-  rename(from: string, to: string): Promise<void>
 }
 
 export interface SurplusStoreOptions {
@@ -73,6 +71,7 @@ export interface SurplusStoreOptions {
   fetcher?: typeof fetch
   fileSystem?: FileSystemLike
   now?: () => number
+  warn?: (message: string) => void | Promise<void>
 }
 
 export type CatalogParseResult =
@@ -87,10 +86,8 @@ export type RefreshResult =
   | { status: "failed"; inventory?: Inventory; reason: string }
 
 const defaultFileSystem: FileSystemLike = {
+  ...atomicFileSystem,
   readFile: (file, encoding) => nodeFs.readFile(file, encoding),
-  writeFile: (file, data, encoding) => nodeFs.writeFile(file, data, encoding),
-  mkdir: (directory, options) => nodeFs.mkdir(directory, options),
-  rename: (from, to) => nodeFs.rename(from, to),
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -151,6 +148,10 @@ function endpointWithoutQuery(value: string): string {
 }
 
 export function endpointCacheKey(value: string): string {
+  return createHash("sha256").update(normalizeEndpoint(value)).digest("hex")
+}
+
+function legacyEndpointCacheKey(value: string): string {
   const normalized = normalizeEndpoint(value)
   try {
     const url = new URL(normalized)
@@ -158,6 +159,14 @@ export function endpointCacheKey(value: string): string {
     return `${endpointWithoutQuery(normalized)}#query-${queryHash}`
   } catch {
     return `invalid-${createHash("sha256").update(normalized).digest("hex").slice(0, 16)}`
+  }
+}
+
+function endpointMetadata(value: string): string {
+  try {
+    return new URL(normalizeEndpoint(value)).origin
+  } catch {
+    return "<invalid-endpoint>"
   }
 }
 
@@ -249,11 +258,19 @@ export function parseCatalogPayload(payload: unknown): CatalogParseResult {
   return { status: "valid", models: [...models.values()] }
 }
 
-function parseCachePayload(payload: unknown, endpoint: string): Inventory | undefined {
+interface ParsedCache {
+  inventory: Inventory
+  requiresRewrite: boolean
+}
+
+function parseCachePayload(payload: unknown, endpoint: string): ParsedCache | undefined {
   if (!isRecord(payload) || payload.version !== CACHE_VERSION || payload.provider !== PROVIDER_ID || payload.account !== "public") return undefined
-  const expectedEndpoint = endpointWithoutQuery(endpoint)
+  const expectedEndpoint = endpointMetadata(endpoint)
   const expectedEndpointKey = endpointCacheKey(endpoint)
-  if (normalizeEndpoint(String(payload.endpoint ?? "")) !== expectedEndpoint || payload.endpointKey !== expectedEndpointKey || !Array.isArray(payload.models)) return undefined
+  const payloadEndpoint = normalizeEndpoint(String(payload.endpoint ?? ""))
+  const isCurrent = payload.endpoint === expectedEndpoint && payload.endpointKey === expectedEndpointKey
+  const isLegacy = payloadEndpoint === endpointWithoutQuery(endpoint) && payload.endpointKey === legacyEndpointCacheKey(endpoint)
+  if ((!isCurrent && !isLegacy) || !Array.isArray(payload.models)) return undefined
 
   const fetchedAt = finiteNumber(payload.fetchedAt)
   if (fetchedAt === undefined) return undefined
@@ -266,13 +283,16 @@ function parseCachePayload(payload: unknown, endpoint: string): Inventory | unde
   if (models.size === 0) return undefined
 
   return {
-    version: CACHE_VERSION,
-    provider: PROVIDER_ID,
-    endpoint: expectedEndpoint,
-    endpointKey: expectedEndpointKey,
-    account: "public",
-    fetchedAt,
-    models: [...models.values()],
+    inventory: {
+      version: CACHE_VERSION,
+      provider: PROVIDER_ID,
+      endpoint: expectedEndpoint,
+      endpointKey: expectedEndpointKey,
+      account: "public",
+      fetchedAt,
+      models: [...models.values()],
+    },
+    requiresRewrite: isLegacy,
   }
 }
 
@@ -288,7 +308,7 @@ function parseLegacyPayload(payload: unknown, endpoint: string): Inventory | und
   return {
     version: CACHE_VERSION,
     provider: PROVIDER_ID,
-    endpoint: endpointWithoutQuery(endpoint),
+    endpoint: endpointMetadata(endpoint),
     endpointKey: endpointCacheKey(endpoint),
     account: "public",
     fetchedAt: 0,
@@ -318,10 +338,7 @@ export function getLegacyCacheFile(cacheDir = getCacheDir()): string {
 }
 
 async function writeCanonicalCache(fileSystem: FileSystemLike, file: string, inventory: Inventory): Promise<void> {
-  await fileSystem.mkdir(path.dirname(file), { recursive: true })
-  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`
-  await fileSystem.writeFile(temporary, `${JSON.stringify(inventory, null, 2)}\n`, "utf8")
-  await fileSystem.rename(temporary, file)
+  await writeFileAtomically(file, `${JSON.stringify(inventory, null, 2)}\n`, fileSystem, 0o600)
 }
 
 export class SurplusInventoryStore {
@@ -331,6 +348,7 @@ export class SurplusInventoryStore {
   private readonly fetcher: typeof fetch
   private readonly fileSystem: FileSystemLike
   private readonly now: () => number
+  private readonly warn: (message: string) => void | Promise<void>
   private lastKnownGood: Inventory | undefined
 
   constructor(options: SurplusStoreOptions = {}) {
@@ -341,6 +359,7 @@ export class SurplusInventoryStore {
     this.fetcher = options.fetcher || fetch
     this.fileSystem = options.fileSystem || defaultFileSystem
     this.now = options.now || Date.now
+    this.warn = options.warn || ((message) => console.warn(`${PLUGIN_ID}: ${message}`))
   }
 
   async load(): Promise<Inventory | undefined> {
@@ -348,8 +367,19 @@ export class SurplusInventoryStore {
 
     const canonical = parseCachePayload(await readJson(this.fileSystem, this.cacheFile), this.endpoint)
     if (canonical) {
-      this.lastKnownGood = canonical
-      return canonical
+      this.lastKnownGood = canonical.inventory
+      if (canonical.requiresRewrite) {
+        try {
+          await writeCanonicalCache(this.fileSystem, this.cacheFile, canonical.inventory)
+        } catch {
+          try {
+            await this.warn("An existing Surplus inventory was loaded, but its stored endpoint metadata could not be securely rewritten. The on-disk cache may still contain endpoint URL details; remove that cache file manually if this warning persists.")
+          } catch {
+            // A broken warning sink must not hide a usable last-known-good inventory.
+          }
+        }
+      }
+      return canonical.inventory
     }
 
     const legacy = this.endpoint === normalizeEndpoint(DEFAULT_ENDPOINT)
@@ -395,7 +425,7 @@ export class SurplusInventoryStore {
       const inventory: Inventory = {
         version: CACHE_VERSION,
         provider: PROVIDER_ID,
-        endpoint: endpointWithoutQuery(this.endpoint),
+        endpoint: endpointMetadata(this.endpoint),
         endpointKey: endpointCacheKey(this.endpoint),
         account: "public",
         fetchedAt: this.now(),
@@ -588,10 +618,8 @@ export function parseJsonc(text: string): unknown {
 
 export function safeEndpointForLog(endpoint: string): string {
   try {
-    const url = new URL(endpoint)
-    url.search = ""
-    url.hash = ""
-    return `${url.origin}${url.pathname.replace(/\/+$/, "") || "/"}`
+    const normalized = normalizeEndpoint(endpoint)
+    return `${endpointMetadata(normalized)} (endpoint ${endpointCacheKey(normalized).slice(0, 16)})`
   } catch {
     return "<invalid-endpoint>"
   }

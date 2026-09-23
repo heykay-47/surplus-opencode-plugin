@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { atomicFileSystem, writeFileAtomically, type AtomicFileSystem } from "./atomic.js"
 import { PLUGIN_ID, parseJsonc } from "./core.js"
 
 export type ConfigFlavor = "v1" | "v2"
@@ -191,13 +192,6 @@ export async function findConfigDocument(
   }
 }
 
-async function writeAtomic(file: string, content: string): Promise<void> {
-  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`
-  await fs.mkdir(path.dirname(file), { recursive: true })
-  await fs.writeFile(temporary, content, "utf8")
-  await fs.rename(temporary, file)
-}
-
 export interface ModelSelectionWriteResult {
   file: string
   flavor: ConfigFlavor
@@ -208,6 +202,7 @@ export async function writeModelSelection(
   directory: string,
   ids: string[],
   requestedFlavor?: string,
+  fileSystem: AtomicFileSystem = atomicFileSystem,
 ): Promise<ModelSelectionWriteResult> {
   const target = await findConfigDocument(directory, process.env.OPENCODE_CONFIG, requestedFlavor)
   const flavor = inferConfigFlavor(target.config, requestedFlavor)
@@ -221,6 +216,6 @@ export async function writeModelSelection(
   root.surplus = provider
   target.config[rootKey] = root
 
-  await writeAtomic(target.file, `${JSON.stringify(target.config, null, 2)}\n`)
+  await writeFileAtomically(target.file, `${JSON.stringify(target.config, null, 2)}\n`, fileSystem, 0o600)
   return { file: target.file, flavor, ids: [...ids] }
 }

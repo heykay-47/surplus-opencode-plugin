@@ -58,6 +58,41 @@ test("the V1 adapter uses the native provider model map and structured log body"
   }
 })
 
+test("the V1 adapter logs an endpoint fingerprint without configured URL components", async () => {
+  const cacheDir = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-v1-endpoint-log-"))
+  const logs: any[] = []
+  const endpoint = "https://proxy.example/private-path-secret?token=query-secret"
+  try {
+    const hooks = await server(
+      {
+        client: { app: { log: async (event: unknown) => logs.push(event) } },
+      } as any,
+      {
+        cacheDir,
+        fetcher: async () => catalogResponse(),
+      } as any,
+    )
+    const config: any = {
+      provider: {
+        surplus: {
+          options: { baseURL: endpoint },
+          models: { "surplus-a": {} },
+        },
+      },
+    }
+
+    await hooks.config?.(config)
+
+    const logged = JSON.stringify(logs)
+    assert.ok(logged.includes("https://proxy.example"))
+    assert.equal(logged.includes("private-path-secret"), false)
+    assert.equal(logged.includes("query-secret"), false)
+    assert.ok(logged.includes("endpoint "))
+  } finally {
+    await rm(cacheDir, { recursive: true, force: true })
+  }
+})
+
 test("the V2 adapter transforms the provider source and reloads after an initial fetch", async () => {
   const cacheDir = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-v2-"))
   const source = {

@@ -19,6 +19,27 @@ import {
 } from "./config.js"
 import { filterCatalogModels, modelDescription } from "./picker.js"
 
+export type CliPrompt = (question: string) => Promise<string>
+
+const terminalControls = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu
+const namedTerminalEscapes: Record<number, string> = {
+  0x08: "\\b",
+  0x09: "\\t",
+  0x0a: "\\n",
+  0x0c: "\\f",
+  0x0d: "\\r",
+}
+
+export function escapeTerminalText(value: string): string {
+  return value.replace(terminalControls, (character) => {
+    const codePoint = character.codePointAt(0)!
+    if (namedTerminalEscapes[codePoint]) return namedTerminalEscapes[codePoint]
+    return codePoint <= 0xff
+      ? `\\x${codePoint.toString(16).padStart(2, "0")}`
+      : `\\u${codePoint.toString(16).padStart(4, "0")}`
+  })
+}
+
 function runtimeOptions(config: Record<string, any>, args: string[]): RuntimeOptions {
   const provider = providerConfig(config)
   const plugin = pluginOptions(config)
@@ -32,7 +53,7 @@ function runtimeOptions(config: Record<string, any>, args: string[]): RuntimeOpt
   return options
 }
 
-export async function runCli(args: string[], output = console): Promise<number> {
+export async function runCli(args: string[], output = console, prompt?: CliPrompt): Promise<number> {
   const command = args[0]
   if (command !== "list" && command !== "refresh" && command !== "pick") {
     output.error("Usage: opencode-surplus <list|refresh|pick> [--cache-dir=/path] [--version=v1|v2]")
@@ -41,7 +62,7 @@ export async function runCli(args: string[], output = console): Promise<number> 
 
   const config = await readConfig()
   const options = runtimeOptions(config, args)
-  const store = new SurplusInventoryStore(options)
+  const store = new SurplusInventoryStore({ ...options, warn: (message) => output.error(message) })
 
   if (command === "refresh") {
     const result = await store.refresh()
@@ -68,7 +89,7 @@ export async function runCli(args: string[], output = console): Promise<number> 
     }
 
     const initial = configuredModelIds(providerConfig(config).models)
-    const selected = await interactiveSelection(inventory.models, initial, output)
+    const selected = await interactiveSelection(inventory.models, initial, output, prompt)
     if (selected === undefined) {
       output.log("Selection cancelled.")
       return 0
@@ -88,7 +109,7 @@ export async function runCli(args: string[], output = console): Promise<number> 
   const selected = new Set(configuredModelIds(providerConfig(config).models))
   output.log("ID\tNAME\tSELECTED")
   for (const model of inventory.models) {
-    output.log(`${model.id}\t${model.name}\t${selected.has(model.id) ? "yes" : "no"}`)
+    output.log(`${escapeTerminalText(model.id)}\t${escapeTerminalText(model.name)}\t${selected.has(model.id) ? "yes" : "no"}`)
   }
   return 0
 }
@@ -97,20 +118,22 @@ async function interactiveSelection(
   models: import("./core.js").CatalogModel[],
   initial: string[],
   output: Pick<Console, "log">,
+  prompt?: CliPrompt,
 ): Promise<string[] | undefined> {
-  const input = createInterface({ input: process.stdin, output: process.stdout })
+  const input = prompt ? undefined : createInterface({ input: process.stdin, output: process.stdout })
+  const ask: CliPrompt = prompt || ((question) => input!.question(question))
   const available = new Set(models.map((model) => model.id))
   const selected = new Set(initial.filter((id) => available.has(id)))
   try {
     while (true) {
-      const query = await input.question('Search Surplus models (type "q" to cancel): ')
+      const query = await ask('Search Surplus models (type "q" to cancel): ')
       if (query.trim().toLowerCase() === "q") return undefined
       const matches = filterCatalogModels(models, query).slice(0, 100)
       output.log(matches.length === 0 ? "No matching models." : "")
       matches.forEach((model, index) => {
-        output.log(`${index + 1}. ${selected.has(model.id) ? "[x]" : "[ ]"} ${model.name} — ${model.id} (${modelDescription(model)})`)
+        output.log(`${index + 1}. ${selected.has(model.id) ? "[x]" : "[ ]"} ${escapeTerminalText(model.name)} — ${escapeTerminalText(model.id)} (${escapeTerminalText(modelDescription(model))})`)
       })
-      const answer = await input.question('Toggle numbers or IDs (comma-separated), "clear", or "done": ')
+      const answer = await ask('Toggle numbers or IDs (comma-separated), "clear", or "done": ')
       const normalized = answer.trim().toLowerCase()
       if (normalized === "done") return [...selected]
       if (normalized === "clear") {
@@ -126,7 +149,7 @@ async function interactiveSelection(
       }
     }
   } finally {
-    input.close()
+    input?.close()
   }
 }
 

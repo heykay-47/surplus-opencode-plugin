@@ -101,7 +101,13 @@ export const setup: V2Plugin["setup"] = async (ctx: Context) => {
 
   const configuredEndpoint = source?.provider?.settings?.baseURL
   const endpoint = typeof configuredEndpoint === "string" && configuredEndpoint.trim() ? configuredEndpoint : runtimeOptions.endpoint || DEFAULT_ENDPOINT
-  const store = new SurplusInventoryStore({ endpoint, cacheDir: runtimeOptions.cacheDir, fetcher: runtimeOptions.fetcher, now: runtimeOptions.now })
+  const store = new SurplusInventoryStore({
+    endpoint,
+    cacheDir: runtimeOptions.cacheDir,
+    fetcher: runtimeOptions.fetcher,
+    now: runtimeOptions.now,
+    warn: (message) => log({ service: PLUGIN_ID, level: "warn", message }),
+  })
   let inventory = await store.load()
   const needsRefresh = !store.isFresh(inventory, ttlMilliseconds(runtimeOptions))
 

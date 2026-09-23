@@ -1,8 +1,9 @@
 import assert from "node:assert/strict"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
+import { atomicFileSystem } from "../src/atomic.js"
 import { parseJsonc } from "../src/core.js"
 import { inferConfigFlavor, writeModelSelection } from "../src/config.js"
 import { filterCatalogModels, modelDescription, modelSelectionMap, toggleModel } from "../src/picker.js"
@@ -51,6 +52,80 @@ test("picker writes the selected native V2 model map and supports V1 override", 
     const v1Config = parseJsonc(await readFile(path.join(root, "opencode.jsonc"), "utf8")) as any
     assert.deepEqual(v1Config.provider.surplus.models, {})
   } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("picker preserves private config modes and creates new configs as owner-only", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-picker-mode-"))
+  const previous = process.env.OPENCODE_CONFIG
+  const config = path.join(root, "opencode.json")
+  try {
+    await mkdir(path.join(root, ".git"))
+    await writeFile(config, JSON.stringify({ provider: { surplus: { models: {} } } }), { mode: 0o600 })
+
+    await writeModelSelection(root, ["surplus-v1"], "v1")
+    assert.equal((await stat(config)).mode & 0o777, 0o600)
+    await writeModelSelection(root, ["surplus-v2"], "v2")
+    assert.equal((await stat(config)).mode & 0o777, 0o600)
+
+    const newConfig = path.join(root, "new-config.json")
+    process.env.OPENCODE_CONFIG = newConfig
+    await writeModelSelection(root, ["surplus-new"], "v2")
+    assert.equal((await stat(newConfig)).mode & 0o777, 0o600)
+    assert.deepEqual(Object.keys((parseJsonc(await readFile(newConfig, "utf8")) as any).providers.surplus.models), ["surplus-new"])
+  } finally {
+    if (previous === undefined) delete process.env.OPENCODE_CONFIG
+    else process.env.OPENCODE_CONFIG = previous
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("picker failures leave the original config intact and remove its temporary file", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-picker-failure-"))
+  const config = path.join(root, "opencode.json")
+  const original = JSON.stringify({ providers: { surplus: { models: { original: {} } } } })
+  try {
+    await mkdir(path.join(root, ".git"))
+    await writeFile(config, original, { mode: 0o600 })
+    const failedFileSystem = {
+      ...atomicFileSystem,
+      rename: async () => {
+        throw new Error("fixture rename failure")
+      },
+    }
+
+    await assert.rejects(writeModelSelection(root, ["replacement"], "v2", failedFileSystem), /fixture rename failure/)
+    assert.equal(await readFile(config, "utf8"), original)
+    assert.deepEqual((await readdir(root)).filter((name) => name.endsWith(".tmp")), [])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("picker temporary creation refuses a pre-planted symlink", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-picker-symlink-"))
+  const config = path.join(root, "opencode.json")
+  const protectedFile = path.join(root, "protected.txt")
+  let plantedLink: string | undefined
+  try {
+    await mkdir(path.join(root, ".git"))
+    await writeFile(config, JSON.stringify({ provider: { surplus: { models: { original: {} } } } }))
+    await writeFile(protectedFile, "must remain unchanged")
+    const fileSystem = {
+      ...atomicFileSystem,
+      open: async (file: string, flags: "wx", mode: number) => {
+        plantedLink = file
+        await symlink(protectedFile, file)
+        return atomicFileSystem.open(file, flags, mode)
+      },
+    }
+
+    await assert.rejects(writeModelSelection(root, ["replacement"], "v1", fileSystem), { code: "EEXIST" })
+    assert.equal(await readFile(protectedFile, "utf8"), "must remain unchanged")
+    assert.deepEqual(Object.keys((parseJsonc(await readFile(config, "utf8")) as any).provider.surplus.models), ["original"])
+  } finally {
+    if (plantedLink) await unlink(plantedLink)
     await rm(root, { recursive: true, force: true })
   }
 })

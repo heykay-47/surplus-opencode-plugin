@@ -132,6 +132,43 @@ failed responses retain the last-known-good inventory. The V2 adapter reloads
 the provider registry after a successful background refresh; V1 uses the fresh
 cache on the next startup.
 
+## Security and dependency monitoring
+
+Picker saves write a same-directory temporary file opened exclusively with an
+unpredictable name. On POSIX systems, existing config permission bits are
+retained and newly created configs use owner-only mode (`0600`). Failed writes
+leave the existing config in place.
+
+The full normalized endpoint, including its path and query, determines cache
+identity so separate proxies cannot share an inventory. Cache metadata and logs
+contain the origin and an opaque fingerprint, not the configured path, query,
+user information, or fragment. When loading an older canonical cache with a raw
+path, the integration keeps its inventory available and attempts a secure
+rewrite. If rewriting fails, it warns that the old disk cache may still contain
+endpoint details;
+remove `surplus-models.json` from the configured cache directory (or
+`~/.cache/opencode/`) manually if the warning persists. Remove any other old
+cache files from former cache directories manually; the integration does not
+scan or rewrite caches it never loads.
+
+CI fails when the production dependency tree has an npm advisory. It also
+reports the full dependency audit, including development dependencies, as an
+informational check so that development-only findings remain visible without
+being mistaken for shipped runtime dependencies.
+
+As checked on 2026-09-23, the development dependency tree contains
+`@opentelemetry/core@2.6.1` through
+`@opencode/plugin@2.0.11` -> `@opencode/util@2.0.11`; this is
+affected by [CVE-2026-54285 / GHSA-8988-4f7v-96qf](https://github.com/open-telemetry/opentelemetry-js/security/advisories/GHSA-8988-4f7v-96qf),
+fixed upstream in version 2.8.0. The production-only audit reported no
+vulnerabilities. The latest checked `@opencode/plugin@2.0.14` also resolves
+`@opentelemetry/core@2.6.1`, so no compatible upstream fix is available through
+that host yet. This project does not force an unverified transitive override. The
+full-audit CI step keeps the development advisory visible until a compatible
+upstream update is available. GitHub Dependabot alerts were disabled for this
+repository at the time of the scan; enabling them remains a repository-admin
+follow-up.
+
 ## CLI
 
 After installing the package, use the version-neutral CLI:

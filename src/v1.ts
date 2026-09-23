@@ -85,7 +85,13 @@ async function configure(config: Record<string, any>, runtimeOptions: RuntimeOpt
   const provider = ensureProvider(config, runtimeOptions.endpoint || DEFAULT_ENDPOINT)
   const options = providerOptions(provider)
   const endpoint = typeof options.baseURL === "string" && options.baseURL.trim() ? options.baseURL : runtimeOptions.endpoint || DEFAULT_ENDPOINT
-  const store = new SurplusInventoryStore({ endpoint, cacheDir: runtimeOptions.cacheDir, fetcher: runtimeOptions.fetcher, now: runtimeOptions.now })
+  const store = new SurplusInventoryStore({
+    endpoint,
+    cacheDir: runtimeOptions.cacheDir,
+    fetcher: runtimeOptions.fetcher,
+    now: runtimeOptions.now,
+    warn: (message) => log({ service: PLUGIN_ID, level: "warn", message }),
+  })
   const configuredModels = provider.models && typeof provider.models === "object" ? provider.models : {}
   const selectedIds = configuredModelIds(configuredModels)
   let inventory = await store.load()
