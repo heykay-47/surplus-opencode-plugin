@@ -17,6 +17,7 @@ import {
   type LogEvent,
   type RuntimeOptions,
 } from "./core.js"
+import { readConfig } from "./config.js"
 
 type ProviderEditor = Parameters<Parameters<Context["provider"]["transform"]>[0]>[0]
 type ProviderRecord = NonNullable<ReturnType<ProviderEditor["get"]>>
@@ -36,32 +37,36 @@ function snapshotSource(source: ProviderRecord | undefined): Source | undefined 
   }
 }
 
-function providerInfo(source: Source | undefined, endpoint: string, emptyProvider: () => ProviderInfo): ProviderInfo {
-  const info: Record<string, any> = source?.provider ? { ...source.provider } : { ...emptyProvider() }
+function providerInfo(source: Source | undefined, configured: Record<string, any>, endpoint: string, emptyProvider: () => ProviderInfo): ProviderInfo {
+  const { models: _models, ...overrides } = configured
+  const info: Record<string, any> = { ...emptyProvider(), ...source?.provider, ...overrides }
   info.id = PROVIDER_ID
   info.name ||= PROVIDER_NAME
   info.activation ||= "enabled"
   info.package ||= "@opencode/ai/providers/openai-compatible"
-  info.settings = { ...(info.settings || {}), baseURL: info.settings?.baseURL || endpoint }
+  info.settings = {
+    ...source?.provider?.settings,
+    ...overrides.settings,
+    baseURL: overrides.settings?.baseURL || source?.provider?.settings?.baseURL || endpoint,
+  }
   return info as ProviderInfo
 }
 
 function modelList(
-  source: Source | undefined,
+  configuredModels: ReadonlyMap<string, ModelInfo> | Record<string, any> | undefined,
   inventory: Inventory | undefined,
   createModel: (model: CatalogModel) => ModelInfo,
 ): ModelInfo[] {
-  const configuredModels = source?.models || new Map<string, ModelInfo>()
   const selectedIds = configuredModelIds(configuredModels)
   if (selectedIds.length === 0) return []
-  if (!inventory) return [...configuredModels.values()]
+  if (!inventory) return configuredModels instanceof Map ? [...configuredModels.values()] : []
 
   const selected = selectedCatalogModels(selectedIds, inventory)
   return selected.models.map((model) => createModel(model))
 }
 
-function logSelection(log: (event: LogEvent) => void, source: Source | undefined, inventory: Inventory | undefined, endpoint: string): void {
-  const selectedIds = configuredModelIds(source?.models)
+function logSelection(log: (event: LogEvent) => void, configuredModels: ReadonlyMap<string, ModelInfo> | Record<string, any> | undefined, inventory: Inventory | undefined, endpoint: string): void {
+  const selectedIds = configuredModelIds(configuredModels)
   if (selectedIds.length === 0) {
     log({
       service: PLUGIN_ID,
@@ -90,16 +95,21 @@ export const setup: V2Plugin["setup"] = async (ctx: Context) => {
   const emptyProvider = () => Provider.Info.empty(providerID)
   const runtimeOptions: RuntimeOptions = resolveRuntimeOptions(ctx.options)
   const log = createLogger()
+  // Native provider overrides are applied after source transforms. A custom
+  // provider does not exist in the source registry at this point, so read its
+  // selection from the same configuration documents used by the CLI picker.
+  const config = await readConfig(ctx.location?.directory)
+  const configured = config.providers?.surplus || {}
   let source: Source | undefined
 
-  // This probe captures the native providers.surplus model map and endpoint without
-  // inventing a second configuration format. It remains active so reload() can
-  // capture the original source again before the application transform replays.
+  // Preserve an existing catalog source when present. Custom providers have no
+  // source at setup time, so their model selection comes from the native config.
   const probe = await ctx.provider.transform((editor) => {
     source = snapshotSource(editor.get(PROVIDER_ID))
   })
 
-  const configuredEndpoint = source?.provider?.settings?.baseURL
+  const configuredModels = configured.models !== undefined ? configured.models : source?.models
+  const configuredEndpoint = configured.settings?.baseURL || source?.provider?.settings?.baseURL
   const endpoint = typeof configuredEndpoint === "string" && configuredEndpoint.trim() ? configuredEndpoint : runtimeOptions.endpoint || DEFAULT_ENDPOINT
   const store = new SurplusInventoryStore({
     endpoint,
@@ -112,10 +122,13 @@ export const setup: V2Plugin["setup"] = async (ctx: Context) => {
   const needsRefresh = !store.isFresh(inventory, ttlMilliseconds(runtimeOptions))
 
   const apply = await ctx.provider.transform((editor) => {
-    const info = providerInfo(source, store.endpoint, emptyProvider)
-    const models = modelList(source, inventory, (model) => {
+    const info = providerInfo(source, configured, store.endpoint, emptyProvider)
+    const models = modelList(configuredModels, inventory, (model) => {
       const base = Model.Info.default(providerID, model.id as ModelID)
-      return Object.assign(base, toV2Model(model, configuredModelValue(source?.models, model.id)))
+      return Object.assign(base, toV2Model(model, {
+        ...configuredModelValue(source?.models, model.id) as object,
+        ...configuredModelValue(configuredModels, model.id) as object,
+      }))
     })
     if (source) {
       editor.update(PROVIDER_ID, (provider) => {
@@ -127,7 +140,7 @@ export const setup: V2Plugin["setup"] = async (ctx: Context) => {
     }
   })
 
-  logSelection(log, source, inventory, store.endpoint)
+  logSelection(log, configuredModels, inventory, store.endpoint)
 
   if (needsRefresh) {
     const refresh = async () => {

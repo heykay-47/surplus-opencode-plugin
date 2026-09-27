@@ -93,7 +93,7 @@ async function readConfigFromRoot(root: string): Promise<Record<string, any> | u
   return undefined
 }
 
-export async function readConfig(): Promise<Record<string, any>> {
+export async function readConfig(directory = process.cwd()): Promise<Record<string, any>> {
   let config: Record<string, any> = {}
   const seen = new Set<string>()
   const mergeRoot = async (root: string) => {
@@ -107,7 +107,7 @@ export async function readConfig(): Promise<Record<string, any>> {
 
   const explicit = process.env.OPENCODE_CONFIG
   if (explicit) {
-    const file = path.resolve(process.cwd(), explicit)
+    const file = path.resolve(directory, explicit)
     if (await existing(file)) {
       try {
         config = mergeConfig(config, await readConfigFile(file))
@@ -117,7 +117,7 @@ export async function readConfig(): Promise<Record<string, any>> {
     }
   }
 
-  for (const root of await projectRoots()) await mergeRoot(root)
+  for (const root of await projectRoots(directory)) await mergeRoot(root)
   return config
 }
 
@@ -196,7 +196,6 @@ export interface ModelSelectionWriteResult {
   file: string
   flavor: ConfigFlavor
   ids: string[]
-  permissionsPreserved: boolean
 }
 
 export async function writeModelSelection(
@@ -217,6 +216,6 @@ export async function writeModelSelection(
   root.surplus = provider
   target.config[rootKey] = root
 
-  const permissionsPreserved = await writeFileAtomically(target.file, `${JSON.stringify(target.config, null, 2)}\n`, fileSystem)
-  return { file: target.file, flavor, ids: [...ids], permissionsPreserved }
+  await writeFileAtomically(target.file, `${JSON.stringify(target.config, null, 2)}\n`, fileSystem)
+  return { file: target.file, flavor, ids: [...ids] }
 }

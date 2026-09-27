@@ -134,14 +134,16 @@ cache on the next startup.
 
 ## Security and dependency monitoring
 
-Picker and cache saves write a same-directory temporary file opened exclusively
-with an unpredictable name. On POSIX systems, atomic writes reject destination
-paths that traverse group- or world-writable directories unless sticky-directory
-ownership protects the temporary entry. Windows ACLs are not checked. Existing
-config permission bits are retained and newly created configs use owner-only
-mode (`0600`). Failed writes before replacement leave the existing config in
-place. If the prior mode cannot be restored after replacement, the save is
-reported as successful with the safer owner-only mode retained.
+Picker and cache saves stage an exclusively opened file under an unpredictable,
+private sibling directory, then atomically rename it into place. On POSIX
+systems, writes reject destination paths that traverse group- or world-writable
+directories unless sticky-directory ownership protects the temporary entry. On
+Windows, the integration checks directory ACLs for write access granted to
+untrusted principals and fails closed if ACL inspection is unavailable. Existing
+POSIX permission bits are applied to the staged file before replacement;
+existing Windows file ACLs are copied before replacement. New configs use
+owner-only permissions (`0600` on POSIX, with a restricted Windows ACL). If
+staging or permission preparation fails, the existing config remains untouched.
 
 The full normalized endpoint, including its path and query, determines cache
 identity so separate proxies cannot share an inventory. Cache metadata and logs

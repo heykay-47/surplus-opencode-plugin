@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
@@ -95,6 +95,10 @@ test("the V1 adapter logs an endpoint fingerprint without configured URL compone
 
 test("the V2 adapter transforms the provider source and reloads after an initial fetch", async () => {
   const cacheDir = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-v2-"))
+  await mkdir(path.join(cacheDir, ".git"))
+  await writeFile(path.join(cacheDir, "opencode.json"), JSON.stringify({ providers: { surplus: {
+    package: "@opencode/ai/providers/openai-compatible", models: { "surplus-a": {} },
+  } } }))
   const source = {
     provider: {
       id: "surplus",
@@ -116,6 +120,7 @@ test("the V2 adapter transforms the provider source and reloads after an initial
 
   try {
     const cleanup = await setup({
+      location: { directory: cacheDir },
       options: {
         cacheDir,
         fetcher: async () => catalogResponse(),
@@ -146,5 +151,48 @@ test("the V2 adapter transforms the provider source and reloads after an initial
     await cleanup?.()
   } finally {
     await rm(cacheDir, { recursive: true, force: true })
+  }
+})
+
+test("the V2 adapter reads native model selections before the provider exists in the registry", async () => {
+  const project = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-v2-config-"))
+  const cacheDir = path.join(project, "cache")
+  await mkdir(path.join(project, ".git"))
+  await writeFile(path.join(project, "opencode.json"), JSON.stringify({
+    providers: { surplus: {
+      settings: { baseURL: "https://proxy.example/v1" },
+      models: { "surplus-a": { name: "Project label" } },
+    } },
+  }))
+  const callbacks: Array<(editor: any) => void> = []
+  const state: { provider?: any; models: any[]; reloads: number } = { models: [], reloads: 0 }
+  const editor = () => ({
+    get: () => undefined,
+    add: ({ info, models }: { info: any; models: any[] }) => { state.provider = info; state.models = models },
+  })
+  try {
+    const cleanup = await setup({
+      location: { directory: project },
+      options: { cacheDir, fetcher: async () => catalogResponse() },
+      provider: {
+        transform: async (callback: (editor: any) => void) => {
+          callbacks.push(callback)
+          callback(editor())
+          return { dispose: async () => undefined }
+        },
+        reload: async () => {
+          state.reloads++
+          for (const callback of callbacks) callback(editor())
+        },
+      },
+    } as any)
+
+    assert.equal(state.reloads, 1)
+    assert.equal(state.provider?.settings.baseURL, "https://proxy.example/v1")
+    assert.deepEqual(state.models.map((model) => model.id), ["surplus-a"])
+    assert.equal(state.models[0].name, "Project label")
+    await cleanup?.()
+  } finally {
+    await rm(project, { recursive: true, force: true })
   }
 })

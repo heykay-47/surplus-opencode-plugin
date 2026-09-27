@@ -94,10 +94,7 @@ export async function runCli(args: string[], output = console): Promise<number> 
     }
 
     const result = await writeModelSelection(process.cwd(), selected, inferConfigFlavor(config, requestedVersion))
-    const permissionNotice = result.permissionsPreserved
-      ? ""
-      : " Previous permissions could not be restored; the saved config remains owner-only."
-    output.log(`Saved ${selected.length} Surplus model${selected.length === 1 ? "" : "s"} to ${result.file}.${permissionNotice}`)
+    output.log(`Saved ${selected.length} Surplus model${selected.length === 1 ? "" : "s"} to ${result.file}.`)
     return 0
   }
 

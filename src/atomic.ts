@@ -2,14 +2,22 @@ import { randomBytes } from "node:crypto"
 import { promises as fs } from "node:fs"
 import type { FileHandle } from "node:fs/promises"
 import path from "node:path"
+import {
+  assertWindowsDirectoriesProtected,
+  copyWindowsFilePermissions,
+  protectWindowsDirectory,
+} from "./windows-security.js"
 
 export interface AtomicFileSystem {
-  mkdir(directory: string, options: { recursive: true; mode: number }): Promise<unknown>
+  mkdir(directory: string, options: { recursive?: boolean; mode: number }): Promise<unknown>
   realpath(file: string): Promise<string>
   stat(file: string): Promise<{ mode: number; uid: number }>
   open(file: string, flags: "wx", mode: number): Promise<FileHandle>
+  protectDirectory(directory: string): Promise<void>
+  copyPermissions(source: string, target: string, mode: number): Promise<void>
   rename(from: string, to: string): Promise<void>
   unlink(file: string): Promise<void>
+  rmdir(directory: string): Promise<void>
 }
 
 export const atomicFileSystem: AtomicFileSystem = {
@@ -17,8 +25,17 @@ export const atomicFileSystem: AtomicFileSystem = {
   realpath: (file) => fs.realpath(file),
   stat: (file) => fs.stat(file),
   open: (file, flags, mode) => fs.open(file, flags, mode),
+  protectDirectory: async (directory) => {
+    if (process.platform === "win32") await protectWindowsDirectory(directory)
+    else await fs.chmod(directory, 0o700)
+  },
+  copyPermissions: async (source, target, mode) => {
+    if (process.platform === "win32") await copyWindowsFilePermissions(source, target)
+    else await fs.chmod(target, mode)
+  },
   rename: (from, to) => fs.rename(from, to),
   unlink: (file) => fs.unlink(file),
+  rmdir: (directory) => fs.rmdir(directory),
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -34,72 +51,74 @@ function isProtectedDirectory(directory: { mode: number; uid: number }): boolean
 }
 
 async function assertProtectedPath(directory: string, fileSystem: AtomicFileSystem): Promise<void> {
-  const checked = new Set<string>()
-  const checkAncestors = async (start: string) => {
+  const paths = new Set<string>()
+  const addAncestors = (start: string) => {
     let current = start
     while (true) {
-      if (!checked.has(current)) {
-        const info = await fileSystem.stat(current)
-        if (!isProtectedDirectory(info)) {
-          throw new Error("Refusing atomic write in a group- or world-writable directory without sticky protection")
-        }
-        checked.add(current)
-      }
+      paths.add(current)
       const parent = path.dirname(current)
       if (parent === current) return
       current = parent
     }
   }
 
-  await checkAncestors(path.resolve(directory))
-  await checkAncestors(await fileSystem.realpath(directory))
+  addAncestors(path.resolve(directory))
+  addAncestors(await fileSystem.realpath(directory))
+
+  if (process.platform === "win32") {
+    await assertWindowsDirectoriesProtected([...paths])
+    return
+  }
+
+  for (const current of paths) {
+    const info = await fileSystem.stat(current)
+    if (!isProtectedDirectory(info)) {
+      throw new Error("Refusing atomic write in a group- or world-writable directory without sticky protection")
+    }
+  }
 }
 
 export async function writeFileAtomically(
   file: string,
   content: string,
   fileSystem: AtomicFileSystem = atomicFileSystem,
-): Promise<boolean> {
+): Promise<void> {
   const directory = path.dirname(file)
   await fileSystem.mkdir(directory, { recursive: true, mode: 0o700 })
   await assertProtectedPath(directory, fileSystem)
 
   let targetMode = 0o600
+  let targetExists = false
   try {
     targetMode = (await fileSystem.stat(file)).mode & 0o777
+    targetExists = true
   } catch (error) {
     if (errorCode(error) !== "ENOENT") throw error
   }
 
-  const temporary = path.join(directory, `.${path.basename(file)}.${randomBytes(16).toString("hex")}.tmp`)
+  const temporaryDirectory = path.join(directory, `.${path.basename(file)}.${randomBytes(16).toString("hex")}.tmp`)
+  const temporary = path.join(temporaryDirectory, path.basename(file))
   let handle: FileHandle | undefined
-  let created = false
+  let temporaryDirectoryCreated = false
+  let temporaryCreated = false
   try {
+    await fileSystem.mkdir(temporaryDirectory, { recursive: false, mode: 0o700 })
+    temporaryDirectoryCreated = true
+    await fileSystem.protectDirectory(temporaryDirectory)
+
     const temporaryHandle = await fileSystem.open(temporary, "wx", 0o600)
     handle = temporaryHandle
-    created = true
+    temporaryCreated = true
     await temporaryHandle.chmod(0o600)
     await temporaryHandle.writeFile(content, "utf8")
     await temporaryHandle.sync()
-    await fileSystem.rename(temporary, file)
-    created = false
-    let permissionsPreserved = true
-    if (targetMode !== 0o600) {
-      try {
-        await temporaryHandle.chmod(targetMode)
-      } catch {
-        // The replacement is committed. Keep the safer private mode and report
-        // that the existing mode could not be restored instead of failing late.
-        permissionsPreserved = false
-      }
-    }
-    try {
-      await temporaryHandle.close()
-    } catch {
-      // The replacement is committed; close errors must not make it look unsaved.
-    }
+
+    if (targetExists) await fileSystem.copyPermissions(file, temporary, targetMode)
+    await temporaryHandle.close()
     handle = undefined
-    return permissionsPreserved
+
+    await fileSystem.rename(temporary, file)
+    temporaryCreated = false
   } catch (error) {
     const cleanupErrors: unknown[] = []
     if (handle) {
@@ -109,16 +128,30 @@ export async function writeFileAtomically(
         cleanupErrors.push(closeError)
       }
     }
-    if (created) {
+    if (temporaryCreated) {
       try {
         await fileSystem.unlink(temporary)
       } catch (unlinkError) {
         if (errorCode(unlinkError) !== "ENOENT") cleanupErrors.push(unlinkError)
       }
     }
+    if (temporaryDirectoryCreated) {
+      try {
+        await fileSystem.rmdir(temporaryDirectory)
+      } catch (rmdirError) {
+        if (errorCode(rmdirError) !== "ENOENT") cleanupErrors.push(rmdirError)
+      }
+    }
     if (cleanupErrors.length > 0) {
       throw new AggregateError([error, ...cleanupErrors], "Atomic file write failed and temporary-file cleanup was incomplete", { cause: error })
     }
     throw error
+  }
+
+  try {
+    await fileSystem.rmdir(temporaryDirectory)
+  } catch {
+    // The replacement is committed; a leftover empty private staging directory
+    // must not make a successful save appear to have failed.
   }
 }

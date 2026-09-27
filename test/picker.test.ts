@@ -1,13 +1,25 @@
 import assert from "node:assert/strict"
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, rmdir, stat, symlink, unlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import test, { afterEach, beforeEach } from "node:test"
 import { atomicFileSystem } from "../src/atomic.js"
 import { parseJsonc } from "../src/core.js"
 import { inferConfigFlavor, writeModelSelection } from "../src/config.js"
 import { filterCatalogModels, modelDescription, modelSelectionMap, toggleModel } from "../src/picker.js"
 import tui from "../src/tui.js"
+
+// The picker intentionally honors OPENCODE_CONFIG, but project fixtures must
+// never write to a real config inherited from the test runner's environment.
+let inheritedConfig: string | undefined
+beforeEach(() => {
+  inheritedConfig = process.env.OPENCODE_CONFIG
+  delete process.env.OPENCODE_CONFIG
+})
+afterEach(() => {
+  if (inheritedConfig === undefined) delete process.env.OPENCODE_CONFIG
+  else process.env.OPENCODE_CONFIG = inheritedConfig
+})
 
 const models = [
   { id: "surplus-a", name: "Alpha Reasoner", description: "Fast text model", contextLength: 64000, pricing: { input: 0.000001, output: 0.000002 } },
@@ -85,10 +97,11 @@ test("picker preserves private config modes and creates new configs as owner-onl
   }
 })
 
-test("picker keeps a replacement temporary file private before restoring the existing mode", async () => {
+test("picker keeps staged config private while restoring the existing mode before replacement", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-picker-temp-mode-"))
   const config = path.join(root, "opencode.json")
   let temporaryMode: number | undefined
+  let temporaryDirectoryMode: number | undefined
   try {
     await mkdir(path.join(root, ".git"))
     await writeFile(config, JSON.stringify({ auth: { token: "synthetic-config-secret" }, provider: { surplus: { models: {} } } }), { mode: 0o640 })
@@ -96,13 +109,15 @@ test("picker keeps a replacement temporary file private before restoring the exi
       ...atomicFileSystem,
       rename: async (temporary: string, target: string) => {
         temporaryMode = (await stat(temporary)).mode & 0o777
+        temporaryDirectoryMode = (await stat(path.dirname(temporary))).mode & 0o777
         await atomicFileSystem.rename(temporary, target)
       },
     }
 
     await writeModelSelection(root, ["surplus-a"], "v1", fileSystem)
 
-    assert.equal(temporaryMode, 0o600)
+    assert.equal(temporaryMode, 0o640)
+    assert.equal(temporaryDirectoryMode, 0o700)
     assert.equal((await stat(config)).mode & 0o777, 0o640)
     assert.equal((parseJsonc(await readFile(config, "utf8")) as any).auth.token, "synthetic-config-secret")
   } finally {
@@ -110,7 +125,7 @@ test("picker keeps a replacement temporary file private before restoring the exi
   }
 })
 
-test("picker does not report failure after replacement if prior mode restoration fails", async () => {
+test("picker keeps the original config if prior permissions cannot be copied to the staged file", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-picker-mode-fail-"))
   const config = path.join(root, "opencode.json")
   try {
@@ -118,22 +133,18 @@ test("picker does not report failure after replacement if prior mode restoration
     await writeFile(config, JSON.stringify({ provider: { surplus: { models: { original: {} } } } }), { mode: 0o640 })
     const fileSystem = {
       ...atomicFileSystem,
-      open: async (file: string, flags: "wx", mode: number) => {
-        const handle = await atomicFileSystem.open(file, flags, mode)
-        const chmod = handle.chmod.bind(handle)
-        handle.chmod = async (requestedMode: number) => {
-          if (requestedMode === 0o640) throw new Error("fixture chmod failure")
-          await chmod(requestedMode)
-        }
-        return handle
+      copyPermissions: async () => {
+        throw new Error("fixture permission-copy failure")
       },
     }
 
-    const result = await writeModelSelection(root, ["replacement"], "v1", fileSystem)
+    await assert.rejects(
+      writeModelSelection(root, ["replacement"], "v1", fileSystem),
+      /fixture permission-copy failure/,
+    )
 
-    assert.equal(result.permissionsPreserved, false)
-    assert.equal((await stat(config)).mode & 0o777, 0o600)
-    assert.deepEqual(Object.keys((parseJsonc(await readFile(config, "utf8")) as any).provider.surplus.models), ["replacement"])
+    assert.equal((await stat(config)).mode & 0o777, 0o640)
+    assert.deepEqual(Object.keys((parseJsonc(await readFile(config, "utf8")) as any).provider.surplus.models), ["original"])
     assert.deepEqual((await readdir(root)).filter((name) => name.endsWith(".tmp")), [])
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -180,9 +191,19 @@ test("picker temporary creation refuses a pre-planted symlink", async () => {
       },
     }
 
-    await assert.rejects(writeModelSelection(root, ["replacement"], "v1", fileSystem), { code: "EEXIST" })
+    await assert.rejects(writeModelSelection(root, ["replacement"], "v1", fileSystem), (error: unknown) => {
+      const writeError = error instanceof AggregateError ? error.errors[0] : error
+      assert.equal((writeError as NodeJS.ErrnoException).code, "EEXIST")
+      return true
+    })
     assert.equal(await readFile(protectedFile, "utf8"), "must remain unchanged")
     assert.deepEqual(Object.keys((parseJsonc(await readFile(config, "utf8")) as any).provider.surplus.models), ["original"])
+    if (plantedLink) {
+      await unlink(plantedLink)
+      await rmdir(path.dirname(plantedLink))
+      plantedLink = undefined
+    }
+    assert.deepEqual((await readdir(root)).filter((name) => name.endsWith(".tmp")), [])
   } finally {
     if (plantedLink) await unlink(plantedLink)
     await rm(root, { recursive: true, force: true })
@@ -251,7 +272,22 @@ test("V2 TUI entrypoint exposes the stable picker plugin ID", () => {
 
 test("V2 TUI registers a palette and slash command", async () => {
   const layers: any[] = []
-  await tui.setup({ keymap: { layer: (factory: () => unknown) => layers.push(factory()) } } as any)
+  let mounted = false
+  let render: (() => unknown) | undefined
+  await tui.setup({
+    ui: { slot: ({ append, render: callback }: any) => {
+      assert.equal(append, "app")
+      render = callback
+    } },
+    keymap: { layer: (factory: () => unknown) => {
+      assert.equal(mounted, true, "keymap must register inside the mounted UI")
+      layers.push(factory())
+    } },
+  } as any)
+  assert.equal(layers.length, 0)
+  assert.ok(render)
+  mounted = true
+  render!()
   const command = layers[0].commands[0]
   assert.equal(command.title, "Select Surplus models")
   assert.equal(command.palette, true)
