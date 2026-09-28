@@ -4,6 +4,7 @@ import {
   PLUGIN_ID,
   PROVIDER_ID,
   PROVIDER_NAME,
+  SURPLUS_API_KEY_ENV,
   SurplusInventoryStore,
   configuredModelIds,
   configuredModelValue,
@@ -35,6 +36,7 @@ function ensureProvider(config: Record<string, any>, defaultEndpoint: string): R
   const provider = config.provider[PROVIDER_ID]
   provider.npm ??= "@ai-sdk/openai-compatible"
   provider.name ??= PROVIDER_NAME
+  provider.env ??= [SURPLUS_API_KEY_ENV]
   const options = providerOptions(provider)
   options.baseURL ??= defaultEndpoint
   return provider

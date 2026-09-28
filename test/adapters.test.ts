@@ -93,6 +93,22 @@ test("the V1 adapter logs an endpoint fingerprint without configured URL compone
   }
 })
 
+
+function recordingIntegrationEditor() {
+  const integrations = new Map<string, { id: string; name: string }>()
+  const methods: any[] = []
+  return {
+    integrations,
+    methods,
+    update: (id: string, update: (item: any) => void) => {
+      const item = integrations.get(id) ?? { id, name: id }
+      update(item)
+      integrations.set(id, item)
+    },
+    method: { update: (input: any) => methods.push(input) },
+  }
+}
+
 test("the V2 adapter transforms the provider source and reloads after an initial fetch", async () => {
   const cacheDir = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-v2-"))
   await mkdir(path.join(cacheDir, ".git"))
@@ -109,6 +125,7 @@ test("the V2 adapter transforms the provider source and reloads after an initial
     },
     models: new Map([["surplus-a", { id: "surplus-a", modelID: "surplus-a", providerID: "surplus", name: "Configured A" }]]),
   }
+  const integrationEditor = recordingIntegrationEditor()
   const callbacks: Array<(editor: any) => void> = []
   const state: { models: any[]; reloads: number } = { models: [], reloads: 0 }
   const makeEditor = () => ({
@@ -124,6 +141,12 @@ test("the V2 adapter transforms the provider source and reloads after an initial
       options: {
         cacheDir,
         fetcher: async () => catalogResponse(),
+      },
+      integration: {
+        transform: async (callback: (editor: any) => void) => {
+          callback(integrationEditor)
+          return { dispose: async () => undefined }
+        },
       },
       provider: {
         transform: async (callback: (editor: any) => void) => {
@@ -164,6 +187,7 @@ test("the V2 adapter reads native model selections before the provider exists in
       models: { "surplus-a": { name: "Project label" } },
     } },
   }))
+  const integrationEditor = recordingIntegrationEditor()
   const callbacks: Array<(editor: any) => void> = []
   const state: { provider?: any; models: any[]; reloads: number } = { models: [], reloads: 0 }
   const editor = () => ({
@@ -174,6 +198,12 @@ test("the V2 adapter reads native model selections before the provider exists in
     const cleanup = await setup({
       location: { directory: project },
       options: { cacheDir, fetcher: async () => catalogResponse() },
+      integration: {
+        transform: async (callback: (editor: any) => void) => {
+          callback(integrationEditor)
+          return { dispose: async () => undefined }
+        },
+      },
       provider: {
         transform: async (callback: (editor: any) => void) => {
           callbacks.push(callback)
@@ -191,6 +221,12 @@ test("the V2 adapter reads native model selections before the provider exists in
     assert.equal(state.provider?.settings.baseURL, "https://proxy.example/v1")
     assert.deepEqual(state.models.map((model) => model.id), ["surplus-a"])
     assert.equal(state.models[0].name, "Project label")
+    assert.equal(state.provider?.integrationID, "surplus")
+    assert.equal(integrationEditor.integrations.get("surplus")?.name, "Surplus Intelligence")
+    assert.deepEqual(integrationEditor.methods.map((input) => input.method), [
+      { type: "key", label: "Surplus API key" },
+      { type: "env", names: ["SURPLUS_API_KEY"] },
+    ])
     await cleanup?.()
   } finally {
     await rm(project, { recursive: true, force: true })

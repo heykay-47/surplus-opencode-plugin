@@ -76,9 +76,37 @@ opencode-surplus pick --version=v1
 Use `--version=v2` to force the V2 config shape. The picker never stores or
 requests an inference API key; catalog discovery remains public.
 
-Configure Surplus credentials through OpenCode's normal provider
-authentication. Catalog discovery is public and does not read or send the
-inference API key.
+## Connect an API key and configure the provider
+
+OpenCode owns the Surplus API key; the plugin never reads, stores, or logs it.
+Catalog discovery is public and never sends the key.
+
+**V2:** the plugin registers **Surplus Intelligence** with OpenCode's credential
+flow. Run `/connect`, choose Surplus Intelligence, and paste your key. OpenCode
+stores it and sends it as a bearer token on inference requests. Alternatively,
+export `SURPLUS_API_KEY` before starting OpenCode. Surplus models appear in
+`/models` only once a key is connected or the variable is set.
+
+**V1:** export `SURPLUS_API_KEY`. The plugin declares it as the provider's
+credential variable.
+
+To set the endpoint, request headers, or other provider settings, run
+`/surplus-setup` in the V2 TUI or use the CLI:
+
+```bash
+opencode-surplus setup \
+  --base-url=https://api.surplusintelligence.ai/v1 \
+  --header="X-Team: core" \
+  --setting=timeout=600000
+```
+
+`--header` and `--setting` may be repeated. Setting values are parsed as JSON
+when possible, and an empty header value (`--header="X-Team:"`) removes that
+header. Setup writes V2 `providers.surplus.settings`/`headers` or V1
+`provider.surplus.options`, keeps your model selection, and adds
+`env: ["SURPLUS_API_KEY"]`. It refuses a literal `apiKey` setting or
+`Authorization`-style header; use an `{env:NAME}` reference if you need to
+point at another variable.
 
 ## Endpoint and policy overrides
 
@@ -182,6 +210,7 @@ After installing the package, use the version-neutral CLI:
 opencode-surplus list
 opencode-surplus refresh
 opencode-surplus pick [--version=v1|v2]
+opencode-surplus setup [--base-url=URL] [--header="Name: value"] [--setting=key=value] [--version=v1|v2]
 ```
 
 `list` shows the cached inventory and marks selected IDs. `refresh` performs one
@@ -189,7 +218,8 @@ public catalog request and updates the shared cache. `pick` opens a searchable
 terminal picker, refreshes the catalog, and writes the selected native model
 map to the active project config. The CLI reads the normal global/project
 OpenCode config hierarchy; pass `--cache-dir=/path` to isolate its cache.
-Neither command requires an API key.
+`setup` writes provider settings as described above. None of these commands
+requires an API key.
 
 ## Development
 

@@ -7,6 +7,7 @@ import { atomicFileSystem, writeFileAtomically, type AtomicFileSystem } from "./
 export const PLUGIN_ID = "opencode-surplus"
 export const PROVIDER_ID = "surplus"
 export const PROVIDER_NAME = "Surplus Intelligence"
+export const SURPLUS_API_KEY_ENV = "SURPLUS_API_KEY"
 export const DEFAULT_ENDPOINT = "https://api.surplusintelligence.ai/v1"
 export const DEFAULT_TTL_MS = 60 * 60 * 1000
 export const CACHE_VERSION = 2

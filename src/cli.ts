@@ -6,16 +6,21 @@ import { fileURLToPath } from "node:url"
 import {
   DEFAULT_ENDPOINT,
   PLUGIN_ID,
+  PROVIDER_NAME,
+  SURPLUS_API_KEY_ENV,
   SurplusInventoryStore,
   configuredModelIds,
   type RuntimeOptions,
 } from "./core.js"
 import {
   inferConfigFlavor,
+  parseHeaderEntries,
+  parseSettingEntries,
   pluginOptions,
   providerConfig,
   readConfig,
   writeModelSelection,
+  writeProviderSetup,
 } from "./config.js"
 import { filterCatalogModels, modelDescription } from "./picker.js"
 
@@ -53,12 +58,43 @@ function runtimeOptions(config: Record<string, any>, args: string[]): RuntimeOpt
 
 export async function runCli(args: string[], output = console): Promise<number> {
   const command = args[0]
-  if (command !== "list" && command !== "refresh" && command !== "pick") {
-    output.error("Usage: opencode-surplus <list|refresh|pick> [--cache-dir=/path] [--version=v1|v2]")
+  if (command !== "list" && command !== "refresh" && command !== "pick" && command !== "setup") {
+    output.error("Usage: opencode-surplus <list|refresh|pick|setup> [--cache-dir=/path] [--version=v1|v2]")
     return 1
   }
 
   const config = await readConfig()
+
+  if (command === "setup") {
+    const requestedVersion = args.find((arg) => arg.startsWith("--version="))?.slice("--version=".length)
+    if (requestedVersion && requestedVersion !== "v1" && requestedVersion !== "v2") {
+      output.error("--version must be v1 or v2")
+      return 1
+    }
+    const values = (flag: string) => args.filter((arg) => arg.startsWith(`--${flag}=`)).map((arg) => arg.slice(flag.length + 3))
+    try {
+      const result = await writeProviderSetup(
+        process.cwd(),
+        {
+          baseURL: values("base-url").at(-1),
+          headers: parseHeaderEntries(values("header")),
+          settings: parseSettingEntries(values("setting")),
+        },
+        inferConfigFlavor(config, requestedVersion),
+      )
+      output.log(`Saved Surplus provider settings to ${result.file}.`)
+      output.log(
+        result.flavor === "v2"
+          ? `Connect your API key with /connect → ${PROVIDER_NAME} in OpenCode, or export ${SURPLUS_API_KEY_ENV}.`
+          : `Export ${SURPLUS_API_KEY_ENV} before starting OpenCode.`,
+      )
+      output.log("Then select models with: opencode-surplus pick")
+      return 0
+    } catch (error) {
+      output.error(escapeTerminalText(error instanceof Error ? error.message : String(error)))
+      return 1
+    }
+  }
   const options = runtimeOptions(config, args)
   const store = new SurplusInventoryStore({ ...options, warn: (message) => output.error(message) })
 

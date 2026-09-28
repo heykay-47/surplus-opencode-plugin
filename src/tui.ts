@@ -3,12 +3,14 @@ import {
   DEFAULT_ENDPOINT,
   PLUGIN_ID,
   PROVIDER_ID,
+  PROVIDER_NAME,
+  SURPLUS_API_KEY_ENV,
   SurplusInventoryStore,
   configuredModelIds,
   resolveRuntimeOptions,
   type CatalogModel,
 } from "./core.js"
-import { findConfigDocument, writeModelSelection } from "./config.js"
+import { findConfigDocument, parseHeaderEntries, writeModelSelection, writeProviderSetup } from "./config.js"
 import { filterCatalogModels, modelDescription, toggleModel } from "./picker.js"
 
 type TuiContext = Parameters<Plugin.Definition["setup"]>[0]
@@ -150,6 +152,58 @@ async function openPicker(context: TuiContext): Promise<void> {
   }
 }
 
+async function openSetup(context: TuiContext): Promise<void> {
+  try {
+    const directory = context.location?.directory || process.cwd()
+    const document = await findConfigDocument(directory, process.env.OPENCODE_CONFIG, "v2")
+    const current = isRecord(document.config.providers?.surplus) ? document.config.providers.surplus : {}
+    const currentSettings = isRecord(current.settings) ? current.settings : {}
+    const currentHeaders = isRecord(current.headers) ? current.headers : {}
+
+    const baseURL = await context.ui.dialog.prompt({
+      title: "Surplus endpoint",
+      description: "OpenAI-compatible base URL used for the catalog and inference.",
+      value: typeof currentSettings.baseURL === "string" ? currentSettings.baseURL : DEFAULT_ENDPOINT,
+    })
+    if (baseURL === undefined) return
+
+    const headerText = await context.ui.dialog.prompt({
+      title: "Surplus request headers",
+      description: "Optional. Separate entries with ';', e.g. X-Team: core; X-Old:  (empty value removes). Do not enter API keys here.",
+      value: Object.entries(currentHeaders).map(([name, value]) => `${name}: ${value}`).join("; "),
+    })
+    if (headerText === undefined) return
+
+    const { baseURL: _baseURL, ...otherSettings } = currentSettings
+    const settingsText = await context.ui.dialog.prompt({
+      title: "Surplus provider settings",
+      description: "Optional JSON object passed to the provider runtime, e.g. {\"timeout\": 600000}. Do not enter API keys here.",
+      value: Object.keys(otherSettings).length > 0 ? JSON.stringify(otherSettings) : "",
+    })
+    if (settingsText === undefined) return
+
+    let settings: Record<string, unknown> = {}
+    if (settingsText.trim()) {
+      const parsed = JSON.parse(settingsText)
+      if (!isRecord(parsed)) throw new Error("Provider settings must be a JSON object.")
+      settings = parsed
+    }
+    const headers = parseHeaderEntries(headerText.split(";").map((entry) => entry.trim()).filter(Boolean))
+    const result = await writeProviderSetup(directory, { baseURL: baseURL.trim() || undefined, headers, settings }, "v2")
+    context.data?.location?.provider?.invalidate?.(context.location)
+    await context.ui.dialog.alert({
+      title: "Surplus provider saved",
+      message: `Settings saved to ${result.file}.\n\nNext: run /connect and choose ${PROVIDER_NAME} to store your API key in OpenCode (or export ${SURPLUS_API_KEY_ENV}), then run /surplus-models. Restart OpenCode if the provider does not update.`,
+    })
+  } catch (error) {
+    context.ui.toast.show({
+      variant: "error",
+      title: "Surplus setup",
+      message: error instanceof Error ? error.message : "Could not save the Surplus provider settings.",
+    })
+  }
+}
+
 export const setup = async (context: TuiContext): Promise<void> => {
   context.ui.slot({
     append: "app",
@@ -165,6 +219,16 @@ export const setup = async (context: TuiContext): Promise<void> => {
             slash: { name: "surplus-models", aliases: ["surplus"] },
             run: () => {
               void openPicker(context)
+            },
+          },
+          {
+            id: `${PLUGIN_ID}.setup`,
+            title: "Set up Surplus provider",
+            description: "Configure the Surplus endpoint, headers, and provider settings",
+            palette: true,
+            slash: { name: "surplus-setup" },
+            run: () => {
+              void openSetup(context)
             },
           },
         ],

@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { atomicFileSystem, writeFileAtomically, type AtomicFileSystem } from "./atomic.js"
-import { PLUGIN_ID, parseJsonc } from "./core.js"
+import { PLUGIN_ID, SURPLUS_API_KEY_ENV, parseJsonc } from "./core.js"
 
 export type ConfigFlavor = "v1" | "v2"
 
@@ -190,6 +190,119 @@ export async function findConfigDocument(
     config,
     flavor: inferConfigFlavor(config, requestedFlavor),
   }
+}
+
+export interface ProviderSetup {
+  baseURL?: string
+  headers?: Record<string, string>
+  settings?: Record<string, unknown>
+}
+
+export interface ProviderSetupWriteResult {
+  file: string
+  flavor: ConfigFlavor
+}
+
+const envReference = /^\{env:[A-Za-z_][A-Za-z0-9_]*\}$/
+const credentialHeaders = new Set(["authorization", "proxy-authorization", "x-api-key", "api-key"])
+
+// Setup writes provider options only. A credential may appear solely as an
+// `{env:NAME}` reference so the literal key stays in OpenCode's credential
+// store or the environment, never in a config file that may be committed.
+export function assertNoLiteralCredentials(setup: ProviderSetup): void {
+  for (const key of Object.keys(setup.settings ?? {})) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") throw new Error(`Invalid setting name: ${key}`)
+  }
+  const apiKey = setup.settings?.apiKey
+  if (apiKey !== undefined && (typeof apiKey !== "string" || !envReference.test(apiKey))) {
+    throw new Error("settings.apiKey must be an {env:NAME} reference; connect the key with /connect or SURPLUS_API_KEY instead")
+  }
+  for (const [name, value] of Object.entries(setup.headers ?? {})) {
+    if (credentialHeaders.has(name.toLowerCase()) && !envReference.test(value)) {
+      throw new Error(`Header ${name} must be an {env:NAME} reference; connect the key with /connect or SURPLUS_API_KEY instead`)
+    }
+  }
+}
+
+// Parses `Name: value` entries. An empty value removes a previously set header.
+export function parseHeaderEntries(entries: string[]): Record<string, string> {
+  const headers: Record<string, string> = {}
+  for (const entry of entries) {
+    const separator = entry.indexOf(":")
+    const name = separator > 0 ? entry.slice(0, separator).trim() : ""
+    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)) throw new Error(`Invalid header entry: ${entry}`)
+    headers[name] = entry.slice(separator + 1).trim()
+  }
+  return headers
+}
+
+// Parses `key=value` entries; values are JSON when they parse as JSON.
+export function parseSettingEntries(entries: string[]): Record<string, unknown> {
+  const settings: Record<string, unknown> = {}
+  for (const entry of entries) {
+    const separator = entry.indexOf("=")
+    const key = separator > 0 ? entry.slice(0, separator).trim() : ""
+    if (!key || key === "__proto__" || key === "constructor" || key === "prototype") {
+      throw new Error(`Invalid setting entry: ${entry}`)
+    }
+    const raw = entry.slice(separator + 1).trim()
+    try {
+      settings[key] = JSON.parse(raw)
+    } catch {
+      settings[key] = raw
+    }
+  }
+  return settings
+}
+
+function mergeHeaders(existing: unknown, updates: Record<string, string> | undefined): Record<string, string> | undefined {
+  const merged: Record<string, string> = isRecord(existing) ? { ...existing } : {}
+  for (const [name, value] of Object.entries(updates ?? {})) {
+    if (value === "") delete merged[name]
+    else merged[name] = value
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined
+}
+
+export async function writeProviderSetup(
+  directory: string,
+  setup: ProviderSetup,
+  requestedFlavor?: string,
+  fileSystem: AtomicFileSystem = atomicFileSystem,
+): Promise<ProviderSetupWriteResult> {
+  assertNoLiteralCredentials(setup)
+  const target = await findConfigDocument(directory, process.env.OPENCODE_CONFIG, requestedFlavor)
+  const flavor = inferConfigFlavor(target.config, requestedFlavor)
+  const rootKey = flavor === "v1" ? "provider" : "providers"
+  const root = isRecord(target.config[rootKey]) ? target.config[rootKey] : {}
+  const provider = isRecord(root.surplus) ? root.surplus : {}
+  provider.env ??= [SURPLUS_API_KEY_ENV]
+
+  if (flavor === "v1") {
+    // V1 passes provider options, including headers, to the AI SDK package.
+    const options = isRecord(provider.options) ? provider.options : {}
+    Object.assign(options, setup.settings)
+    if (setup.baseURL) options.baseURL = setup.baseURL
+    options.apiKey ??= `{env:${SURPLUS_API_KEY_ENV}}`
+    const headers = mergeHeaders(options.headers, setup.headers)
+    if (headers) options.headers = headers
+    else delete options.headers
+    provider.options = options
+  } else {
+    const settings = isRecord(provider.settings) ? provider.settings : {}
+    Object.assign(settings, setup.settings)
+    if (setup.baseURL) settings.baseURL = setup.baseURL
+    provider.settings = settings
+    const headers = mergeHeaders(provider.headers, setup.headers)
+    if (headers) provider.headers = headers
+    else delete provider.headers
+  }
+  provider.models ??= {}
+  root.surplus = provider
+  target.config[rootKey] = root
+
+  await writeFileAtomically(target.file, `${JSON.stringify(target.config, null, 2)}\n`, fileSystem)
+  return { file: target.file, flavor }
 }
 
 export interface ModelSelectionWriteResult {

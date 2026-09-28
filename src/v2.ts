@@ -4,6 +4,7 @@ import {
   PLUGIN_ID,
   PROVIDER_ID,
   PROVIDER_NAME,
+  SURPLUS_API_KEY_ENV,
   SurplusInventoryStore,
   configuredModelIds,
   configuredModelValue,
@@ -41,6 +42,7 @@ function providerInfo(source: Source | undefined, configured: Record<string, any
   const { models: _models, ...overrides } = configured
   const info: Record<string, any> = { ...emptyProvider(), ...source?.provider, ...overrides }
   info.id = PROVIDER_ID
+  info.integrationID ||= PROVIDER_ID
   info.name ||= PROVIDER_NAME
   info.activation ||= "enabled"
   info.package ||= "@opencode/ai/providers/openai-compatible"
@@ -104,6 +106,16 @@ export const setup: V2Plugin["setup"] = async (ctx: Context) => {
 
   // Preserve an existing catalog source when present. Custom providers have no
   // source at setup time, so their model selection comes from the native config.
+  // Register Surplus with OpenCode's credential flow so `/connect` offers it.
+  // OpenCode stores the key; the plugin never reads or persists it.
+  const integration = await ctx.integration.transform((editor) => {
+    editor.update(PROVIDER_ID, (item) => {
+      item.name = PROVIDER_NAME
+    })
+    editor.method.update({ integrationID: PROVIDER_ID, method: { type: "key", label: "Surplus API key" } })
+    editor.method.update({ integrationID: PROVIDER_ID, method: { type: "env", names: [SURPLUS_API_KEY_ENV] } })
+  })
+
   const probe = await ctx.provider.transform((editor) => {
     source = snapshotSource(editor.get(PROVIDER_ID))
   })
@@ -183,6 +195,7 @@ export const setup: V2Plugin["setup"] = async (ctx: Context) => {
   return async () => {
     await probe.dispose()
     await apply.dispose()
+    await integration.dispose()
   }
 }
 
