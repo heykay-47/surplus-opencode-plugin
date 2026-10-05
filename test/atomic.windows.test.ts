@@ -46,6 +46,32 @@ test("Windows inherit-only permissions are ignored on ancestors but rejected on 
   }
 })
 
+test("Windows allows create-only ancestors but rejects destructive ancestors and writable staging parents", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-windows-ancestor-"))
+  const child = path.join(root, "private")
+  try {
+    await mkdir(child)
+    await runIcacls([child, "/inheritance:d"])
+    await runIcacls([root, "/grant", "*S-1-5-32-545:(WD,AD)"])
+    await assertWindowsDirectoriesProtected([root, child], [child])
+    await assert.rejects(
+      assertWindowsDirectoriesProtected([root]),
+      /Windows directory permissions are unsafe or could not be verified/,
+    )
+
+    await runIcacls([root, "/grant:r", "*S-1-5-32-545:(DC)"])
+    await assert.rejects(
+      assertWindowsDirectoriesProtected([root, child], [child]),
+      /Windows directory permissions are unsafe or could not be verified/,
+    )
+  } finally {
+    await runIcacls([root, "/remove:g", "*S-1-5-32-545"])
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test("Windows atomic writes preserve file ACLs and refuse shared-writable directories", {
   skip: process.platform !== "win32",
 }, async () => {

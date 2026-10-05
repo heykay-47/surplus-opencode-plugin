@@ -191,8 +191,12 @@ Picker and cache saves stage an exclusively opened file under an unpredictable,
 private sibling directory, then atomically rename it into place. On POSIX
 systems, writes reject destination paths that traverse group- or world-writable
 directories unless sticky-directory ownership protects the temporary entry. On
-Windows, the integration checks directory ACLs for write access granted to
-untrusted principals and fails closed if ACL inspection is unavailable. Existing
+Windows, the integration rejects untrusted permissions that can replace path
+ancestors or modify the destination's children, and fails closed if ACL
+inspection is unavailable. Create-only permissions on ancestors and inherit-only
+rules that do not apply to those ancestors are not treated as replacement rights.
+The checks use built-in Windows PowerShell with a 60-second timeout per operation;
+cold startup can make saves slower on Windows. Existing
 POSIX permission bits are applied to the staged file before replacement;
 existing Windows file ACLs are copied before replacement. New configs use
 owner-only permissions (`0600` on POSIX, with a restricted Windows ACL). If

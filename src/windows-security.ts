@@ -14,38 +14,43 @@ try {
     'S-1-3-0',
     'S-1-3-4'
   )
-  $dangerous = [int](
-    [System.Security.AccessControl.FileSystemRights]::CreateFiles -bor
-    [System.Security.AccessControl.FileSystemRights]::CreateDirectories -bor
+  $ancestorDangerous = [int](
     [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
     [System.Security.AccessControl.FileSystemRights]::Delete -bor
     [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-    [System.Security.AccessControl.FileSystemRights]::TakeOwnership
+    [System.Security.AccessControl.FileSystemRights]::TakeOwnership -bor
+    0x10000000
   )
-  $index = 0
-  $safe = $true
+  $destinationDangerous = [int](
+    $ancestorDangerous -bor
+    [System.Security.AccessControl.FileSystemRights]::CreateFiles -bor
+    [System.Security.AccessControl.FileSystemRights]::CreateDirectories -bor
+    0x40000000
+  )
   foreach ($directory in $paths) {
     $acl = Get-Acl -LiteralPath $directory
     $descriptor = [System.Security.AccessControl.RawSecurityDescriptor]::new(
       $acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
     )
-    if ($null -eq $descriptor.DiscretionaryAcl) { [Console]::Error.WriteLine('[DEBUG-ACL-cc24] null DACL'); exit 1 }
+    if ($null -eq $descriptor.DiscretionaryAcl) { exit 1 }
     $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-    if ($trusted -notcontains $owner) { [Console]::Error.WriteLine("[DEBUG-ACL-cc24] untrusted owner index $index"); exit 1 }
+    if ($trusted -notcontains $owner) { exit 1 }
+    $isDestination = $destinations -contains $directory
+    # Creating siblings cannot replace an existing protected ancestor. Creating
+    # children at the destination can race creation of our staging directory.
+    $dangerous = if ($isDestination) { $destinationDangerous } else { $ancestorDangerous }
     foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
       if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
       if ($trusted -contains $rule.IdentityReference.Value) { continue }
       # Inherit-only rules do not grant access to this ancestor. At the
       # destination they may grant access to a newly created staging directory.
-      if (($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0 -and $destinations -notcontains $directory) { continue }
-      if (([int]$rule.FileSystemRights -band $dangerous) -ne 0) { [Console]::Error.WriteLine("[DEBUG-ACL-cc24] unsafe allow index $index rights $($rule.FileSystemRights) propagation $($rule.PropagationFlags)"); $safe = $false }
+      if (($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0 -and -not $isDestination) { continue }
+      # Generic ALL/WRITE bits can remain unmapped on inherit-only ACEs.
+      if (([int]$rule.FileSystemRights -band $dangerous) -ne 0) { exit 1 }
     }
-    $index++
   }
-  if (-not $safe) { exit 1 }
   exit 0
 } catch {
-  [Console]::Error.WriteLine("[DEBUG-ACL-cc24] exception type $($_.Exception.GetType().Name)")
   exit 1
 }
 `
@@ -114,11 +119,10 @@ function runPowerShell(script: string, variables: Record<string, string>, failur
       powershell,
       ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodedScript],
       { env, windowsHide: true, timeout: 60_000, maxBuffer: 4096, encoding: "utf8" },
-      (error, _stdout, stderr) => {
+      (error) => {
         if (!error) return resolve()
         const reason = error.killed ? "PowerShell timed out" : `PowerShell exit code ${error.code ?? "unknown"}`
-        const diagnostic = stderr.match(/\[DEBUG-ACL-cc24\][^\r\n]*/)?.[0] ?? ""
-        reject(new Error(`${failureMessage} (${reason}) ${diagnostic}`))
+        reject(new Error(`${failureMessage} (${reason})`))
       },
     )
     // Input is carried in the environment; close the unused stdin pipe.
