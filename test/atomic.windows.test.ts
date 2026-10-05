@@ -85,6 +85,18 @@ test("Windows atomic writes preserve file ACLs and refuse shared-writable direct
     assert.equal(await readFile(config, "utf8"), "replacement")
     assert.equal(await runIcacls([config]), originalAcl)
 
+    // Cover both protected explicit rules and an inheritance-enabled DACL.
+    await runIcacls([config, "/inheritance:r"])
+    const protectedAcl = await runIcacls([config])
+    await writeFileAtomically(config, "protected replacement")
+    assert.equal(await readFile(config, "utf8"), "protected replacement")
+    assert.equal(await runIcacls([config]), protectedAcl)
+    await runIcacls([config, "/inheritance:e"])
+    const inheritedAcl = await runIcacls([config])
+    await writeFileAtomically(config, "inherited replacement")
+    assert.equal(await readFile(config, "utf8"), "inherited replacement")
+    assert.equal(await runIcacls([config]), inheritedAcl)
+
     await mkdir(shared)
     await runIcacls([shared, "/grant", "*S-1-5-32-545:(OI)(CI)(M)"])
     try {

@@ -89,8 +89,23 @@ try {
 const copyPermissionsScript = `
 $ErrorActionPreference = 'Stop'
 try {
+  # Set-Acl uses automatic inheritance and can replace explicit ACEs with
+  # inherited rules from the staging parent. SetFileSecurity copies the DACL
+  # without that propagation, preserving the original inheritance policy.
+  Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class SurplusFileSecurity {
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool SetFileSecurityW(string path, uint information, byte[] descriptor);
+}
+'@
   $acl = Get-Acl -LiteralPath $env:OPENCODE_SURPLUS_ACL_SOURCE
-  Set-Acl -LiteralPath $env:OPENCODE_SURPLUS_ACL_TARGET -AclObject $acl | Out-Null
+  $descriptor = $acl.GetSecurityDescriptorBinaryForm()
+  if (-not [SurplusFileSecurity]::SetFileSecurityW($env:OPENCODE_SURPLUS_ACL_TARGET, 4, $descriptor)) { exit 1 }
+  $copied = Get-Acl -LiteralPath $env:OPENCODE_SURPLUS_ACL_TARGET
+  $access = [System.Security.AccessControl.AccessControlSections]::Access
+  if ($acl.GetSecurityDescriptorSddlForm($access) -ne $copied.GetSecurityDescriptorSddlForm($access)) { exit 1 }
   exit 0
 } catch {
   exit 1
