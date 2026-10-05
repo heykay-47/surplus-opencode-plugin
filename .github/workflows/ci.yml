@@ -37,6 +37,8 @@ jobs:
             v2: "2.0.11"
           - v1: "1.18.31"
             v2: "2.0.22"
+          - v1: "latest"
+            v2: "latest"
 
     steps:
       - uses: actions/checkout@v4

@@ -219,7 +219,9 @@ development host to `@opencode/plugin@2.0.22` and refreshing its transitive
 dependencies removed the previous OpenTelemetry and HTTP cache advisories.
 The compatibility matrix also tests the older `2.0.11` API using a separate
 development installation; it is not the beta's source-build lock. Host peer
-dependencies remain optional and are supplied by OpenCode.
+dependencies remain optional and are supplied by OpenCode. A separate `latest`
+matrix lane tracks new host releases alongside the support floor and pinned beta
+build versions.
 
 ## CLI
 
