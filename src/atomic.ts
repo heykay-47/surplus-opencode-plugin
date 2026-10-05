@@ -62,11 +62,11 @@ async function assertProtectedPath(directory: string, fileSystem: AtomicFileSyst
     }
   }
 
-  addAncestors(path.resolve(directory))
-  addAncestors(await fileSystem.realpath(directory))
+  const destinations = [path.resolve(directory), await fileSystem.realpath(directory)]
+  for (const destination of destinations) addAncestors(destination)
 
   if (process.platform === "win32") {
-    await assertWindowsDirectoriesProtected([...paths])
+    await assertWindowsDirectoriesProtected([...paths], destinations)
     return
   }
 

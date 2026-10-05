@@ -5,6 +5,7 @@ const checkDirectoriesScript = `
 $ErrorActionPreference = 'Stop'
 try {
   $paths = ConvertFrom-Json -InputObject $env:OPENCODE_SURPLUS_ACL_PATHS
+  $destinations = ConvertFrom-Json -InputObject $env:OPENCODE_SURPLUS_ACL_DESTINATIONS
   $trusted = @(
     [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
     'S-1-5-18',
@@ -34,6 +35,9 @@ try {
     foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
       if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
       if ($trusted -contains $rule.IdentityReference.Value) { continue }
+      # Inherit-only rules do not grant access to this ancestor. At the
+      # destination they may grant access to a newly created staging directory.
+      if (($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0 -and $destinations -notcontains $directory) { continue }
       if (([int]$rule.FileSystemRights -band $dangerous) -ne 0) { [Console]::Error.WriteLine("[DEBUG-ACL-cc24] unsafe allow index $index rights $($rule.FileSystemRights) propagation $($rule.PropagationFlags)"); $safe = $false }
     }
     $index++
@@ -117,16 +121,18 @@ function runPowerShell(script: string, variables: Record<string, string>, failur
         reject(new Error(`${failureMessage} (${reason}) ${diagnostic}`))
       },
     )
-    // Windows PowerShell waits for EOF on redirected stdin even when the
-    // command is encoded. Input is carried in the environment, not this pipe.
+    // Input is carried in the environment; close the unused stdin pipe.
     child.stdin?.end()
   })
 }
 
-export function assertWindowsDirectoriesProtected(directories: string[]): Promise<void> {
+export function assertWindowsDirectoriesProtected(directories: string[], destinations: string[] = directories): Promise<void> {
   return runPowerShell(
     checkDirectoriesScript,
-    { OPENCODE_SURPLUS_ACL_PATHS: JSON.stringify(directories) },
+    {
+      OPENCODE_SURPLUS_ACL_PATHS: JSON.stringify(directories),
+      OPENCODE_SURPLUS_ACL_DESTINATIONS: JSON.stringify(destinations),
+    },
     "Refusing atomic write because Windows directory permissions are unsafe or could not be verified",
   )
 }
