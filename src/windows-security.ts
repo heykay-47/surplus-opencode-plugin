@@ -21,22 +21,27 @@ try {
     [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
     [System.Security.AccessControl.FileSystemRights]::TakeOwnership
   )
+  $index = 0
+  $safe = $true
   foreach ($directory in $paths) {
     $acl = Get-Acl -LiteralPath $directory
     $descriptor = [System.Security.AccessControl.RawSecurityDescriptor]::new(
       $acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
     )
-    if ($null -eq $descriptor.DiscretionaryAcl) { exit 1 }
+    if ($null -eq $descriptor.DiscretionaryAcl) { [Console]::Error.WriteLine('[DEBUG-ACL-cc24] null DACL'); exit 1 }
     $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-    if ($trusted -notcontains $owner) { exit 1 }
+    if ($trusted -notcontains $owner) { [Console]::Error.WriteLine("[DEBUG-ACL-cc24] untrusted owner index $index"); exit 1 }
     foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
       if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
       if ($trusted -contains $rule.IdentityReference.Value) { continue }
-      if (([int]$rule.FileSystemRights -band $dangerous) -ne 0) { exit 1 }
+      if (([int]$rule.FileSystemRights -band $dangerous) -ne 0) { [Console]::Error.WriteLine("[DEBUG-ACL-cc24] unsafe allow index $index rights $($rule.FileSystemRights) propagation $($rule.PropagationFlags)"); $safe = $false }
     }
+    $index++
   }
+  if (-not $safe) { exit 1 }
   exit 0
 } catch {
+  [Console]::Error.WriteLine("[DEBUG-ACL-cc24] exception type $($_.Exception.GetType().Name)")
   exit 1
 }
 `
@@ -104,11 +109,12 @@ function runPowerShell(script: string, variables: Record<string, string>, failur
     const child = execFile(
       powershell,
       ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodedScript],
-      { env, windowsHide: true, timeout: 30_000, maxBuffer: 4096, encoding: "utf8" },
-      (error) => {
+      { env, windowsHide: true, timeout: 60_000, maxBuffer: 4096, encoding: "utf8" },
+      (error, _stdout, stderr) => {
         if (!error) return resolve()
         const reason = error.killed ? "PowerShell timed out" : `PowerShell exit code ${error.code ?? "unknown"}`
-        reject(new Error(`${failureMessage} (${reason})`))
+        const diagnostic = stderr.match(/\[DEBUG-ACL-cc24\][^\r\n]*/)?.[0] ?? ""
+        reject(new Error(`${failureMessage} (${reason}) ${diagnostic}`))
       },
     )
     // Windows PowerShell waits for EOF on redirected stdin even when the
