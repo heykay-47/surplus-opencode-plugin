@@ -5,6 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import { writeFileAtomically } from "../src/atomic.js"
+import { assertWindowsDirectoriesProtected } from "../src/windows-security.js"
 
 function runIcacls(args: string[]): Promise<string> {
   const systemRoot = process.env.SystemRoot || process.env.WINDIR || "C:\\Windows"
@@ -16,6 +17,12 @@ function runIcacls(args: string[]): Promise<string> {
     })
   })
 }
+
+test("Windows ACL inspection completes without stdin input", {
+  skip: process.platform !== "win32",
+}, async () => {
+  await assertWindowsDirectoriesProtected([])
+})
 
 test("Windows atomic writes preserve file ACLs and refuse shared-writable directories", {
   skip: process.platform !== "win32",

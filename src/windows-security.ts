@@ -101,7 +101,7 @@ function runPowerShell(script: string, variables: Record<string, string>, failur
   const encodedScript = Buffer.from(script, "utf16le").toString("base64")
 
   return new Promise((resolve, reject) => {
-    execFile(
+    const child = execFile(
       powershell,
       ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodedScript],
       { env, windowsHide: true, timeout: 30_000, maxBuffer: 4096, encoding: "utf8" },
@@ -111,6 +111,9 @@ function runPowerShell(script: string, variables: Record<string, string>, failur
         reject(new Error(`${failureMessage} (${reason})`))
       },
     )
+    // Windows PowerShell waits for EOF on redirected stdin even when the
+    // command is encoded. Input is carried in the environment, not this pipe.
+    child.stdin?.end()
   })
 }
 
