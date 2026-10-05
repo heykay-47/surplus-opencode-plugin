@@ -68,5 +68,6 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run typecheck:test
+      - run: node scripts/debug-windows-powershell.mjs
       - run: npx tsx --test test/atomic.windows.test.ts
       - run: npm run check:package
