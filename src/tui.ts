@@ -10,7 +10,7 @@ import {
   resolveRuntimeOptions,
   type CatalogModel,
 } from "./core.js"
-import { findConfigDocument, parseHeaderEntries, writeModelSelection, writeProviderSetup } from "./config.js"
+import { findConfigDocument, parseHeaderObject, writeModelSelection, writeProviderSetup } from "./config.js"
 import { filterCatalogModels, modelDescription, toggleModel } from "./picker.js"
 
 type TuiContext = Parameters<Plugin.Definition["setup"]>[0]
@@ -152,6 +152,19 @@ async function openPicker(context: TuiContext): Promise<void> {
   }
 }
 
+function parseSetupObject(text: string, label: string): Record<string, unknown> {
+  if (!text.trim()) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    // JSON parser messages can include credential-bearing input snippets.
+    throw new Error(`${label} must be a valid JSON object.`)
+  }
+  if (!isRecord(parsed)) throw new Error(`${label} must be a JSON object.`)
+  return parsed
+}
+
 async function openSetup(context: TuiContext): Promise<void> {
   try {
     const directory = context.location?.directory || process.cwd()
@@ -169,27 +182,22 @@ async function openSetup(context: TuiContext): Promise<void> {
 
     const headerText = await context.ui.dialog.prompt({
       title: "Surplus request headers",
-      description: "Optional. Separate entries with ';', e.g. X-Team: core; X-Old:  (empty value removes). Do not enter API keys here.",
-      value: Object.entries(currentHeaders).map(([name, value]) => `${name}: ${value}`).join("; "),
+      description: "Optional JSON object, e.g. {\"X-Team\":\"core\"}. Omitted or empty entries are removed. Do not enter API keys here.",
+      value: Object.keys(currentHeaders).length > 0 ? JSON.stringify(currentHeaders) : "",
     })
     if (headerText === undefined) return
 
     const { baseURL: _baseURL, ...otherSettings } = currentSettings
     const settingsText = await context.ui.dialog.prompt({
       title: "Surplus provider settings",
-      description: "Optional JSON object passed to the provider runtime, e.g. {\"timeout\": 600000}. Do not enter API keys here.",
+      description: "Optional JSON object, e.g. {\"timeout\":600000}. Omitted settings are removed. Do not enter API keys here.",
       value: Object.keys(otherSettings).length > 0 ? JSON.stringify(otherSettings) : "",
     })
     if (settingsText === undefined) return
 
-    let settings: Record<string, unknown> = {}
-    if (settingsText.trim()) {
-      const parsed = JSON.parse(settingsText)
-      if (!isRecord(parsed)) throw new Error("Provider settings must be a JSON object.")
-      settings = parsed
-    }
-    const headers = parseHeaderEntries(headerText.split(";").map((entry) => entry.trim()).filter(Boolean))
-    const result = await writeProviderSetup(directory, { baseURL: baseURL.trim() || undefined, headers, settings }, "v2")
+    const settings = parseSetupObject(settingsText, "Provider settings")
+    const headers = parseHeaderObject(parseSetupObject(headerText, "Request headers"))
+    const result = await writeProviderSetup(directory, { baseURL: baseURL.trim() || undefined, headers, settings, mode: "replace" }, "v2")
     context.data?.location?.provider?.invalidate?.(context.location)
     await context.ui.dialog.alert({
       title: "Surplus provider saved",

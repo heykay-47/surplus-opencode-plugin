@@ -23,9 +23,7 @@ jobs:
       - run: npm ci
       - name: Fail on production dependency advisories
         run: npm audit --omit=dev
-      - name: Report the full dependency tree, including development tools
-        if: always()
-        continue-on-error: true
+      - name: Check the full dependency tree, including development tools
         run: npm audit --audit-level=low
 
   verify:
@@ -38,7 +36,7 @@ jobs:
           - v1: "1.18.29"
             v2: "2.0.11"
           - v1: "1.18.31"
-            v2: "latest"
+            v2: "2.0.22"
 
     steps:
       - uses: actions/checkout@v4
@@ -54,7 +52,7 @@ jobs:
       - run: npm run typecheck:test
       - run: npm test
       - run: npm run build
-      - run: npm pack --dry-run
+      - run: npm run check:package
 
   windows-acl:
     name: Windows ACL verification

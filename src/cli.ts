@@ -80,7 +80,7 @@ export async function runCli(args: string[], output = console): Promise<number> 
           headers: parseHeaderEntries(values("header")),
           settings: parseSettingEntries(values("setting")),
         },
-        inferConfigFlavor(config, requestedVersion),
+        inferConfigFlavor(config, requestedVersion, "v2"),
       )
       output.log(`Saved Surplus provider settings to ${result.file}.`)
       output.log(

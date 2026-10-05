@@ -12,6 +12,22 @@ It supports:
 - rich Surplus catalog metadata in V2 and a compatible down-map in V1
 - cache-first startup with a one-hour refresh TTL and a manual refresh command
 
+## Public beta
+
+The first beta is `0.3.0-beta.1`. Pin it in your OpenCode config:
+
+```jsonc
+// V2
+{ "plugins": ["opencode-surplus@0.3.0-beta.1"] }
+// V1
+{ "plugin": ["opencode-surplus@0.3.0-beta.1"] }
+```
+
+Install the CLI with `npm install --global opencode-surplus@beta` after the
+beta is published. Beta releases use the `beta` distribution tag, not `latest`.
+Use a test project for initial setup; this release changes provider configuration
+when you confirm setup or model selections.
+
 ## Select models
 
 Discovery never exposes every model automatically. Add the exact Surplus model
@@ -93,6 +109,12 @@ credential variable.
 To set the endpoint, request headers, or other provider settings, run
 `/surplus-setup` in the V2 TUI or use the CLI:
 
+The TUI edits headers and settings as JSON objects. For example, enter
+`{"Content-Type":"application/json; charset=utf-8","X-Team":"core"}`
+in the headers field. Removing an entry removes it from the saved config;
+clearing the headers or settings field resets that object. Clearing the endpoint
+field removes the endpoint override. Your model selection remains unchanged.
+
 ```bash
 opencode-surplus setup \
   --base-url=https://api.surplusintelligence.ai/v1 \
@@ -101,12 +123,15 @@ opencode-surplus setup \
 ```
 
 `--header` and `--setting` may be repeated. Setting values are parsed as JSON
-when possible, and an empty header value (`--header="X-Team:"`) removes that
-header. Setup writes V2 `providers.surplus.settings`/`headers` or V1
+when possible. CLI flags update only the supplied settings and headers, and an
+empty header value (`--header="X-Team:"`) removes that header. Fresh CLI setup
+defaults to V2; detected V1 configs stay V1. Use `--version=v1` or `--version=v2`
+to choose explicitly. Setup writes V2 `providers.surplus.settings`/`headers` or V1
 `provider.surplus.options`, keeps your model selection, and adds
-`env: ["SURPLUS_API_KEY"]`. It refuses a literal `apiKey` setting or
-`Authorization`-style header; use an `{env:NAME}` reference if you need to
-point at another variable.
+`env: ["SURPLUS_API_KEY"]` if no credential variables are already declared.
+It refuses literal `apiKey` settings and `Authorization`-style headers, including
+those nested in settings objects or arrays. Use an `{env:NAME}` reference if you
+need to point at another variable. Validation errors never echo credential values.
 
 ## Endpoint and policy overrides
 
@@ -184,23 +209,13 @@ directory (or `~/.cache/opencode/`) manually if the warning persists. Remove
 any other old cache files from former cache directories manually; the
 integration does not scan or rewrite caches it never loads.
 
-CI fails when the production dependency tree has an npm advisory. It also
-reports the full dependency audit, including development dependencies, as an
-informational check so that development-only findings remain visible without
-being mistaken for shipped runtime dependencies.
-
-As checked on 2026-09-23, the development dependency tree contains
-`@opentelemetry/core@2.6.1` through
-`@opencode/plugin@2.0.11` -> `@opencode/util@2.0.11`; this is
-affected by [CVE-2026-54285 / GHSA-8988-4f7v-96qf](https://github.com/open-telemetry/opentelemetry-js/security/advisories/GHSA-8988-4f7v-96qf),
-fixed upstream in version 2.8.0. The production-only audit reported no
-vulnerabilities. The latest checked `@opencode/plugin@2.0.14` also resolves
-`@opentelemetry/core@2.6.1`, so no compatible upstream fix is available through
-that host yet. This project does not force an unverified transitive override. The
-full-audit CI step keeps the development advisory visible until a compatible
-upstream update is available. GitHub Dependabot alerts were disabled for this
-repository at the time of the scan; enabling them remains a repository-admin
-follow-up.
+CI checks both production and full dependency audits. As checked on 2026-10-05,
+the beta build lock reports zero vulnerabilities in both. Updating the V2
+development host to `@opencode/plugin@2.0.22` and refreshing its transitive
+dependencies removed the previous OpenTelemetry and HTTP cache advisories.
+The compatibility matrix also tests the older `2.0.11` API using a separate
+development installation; it is not the beta's source-build lock. Host peer
+dependencies remain optional and are supplied by OpenCode.
 
 ## CLI
 
@@ -245,3 +260,26 @@ This modified fork is licensed under the GNU General Public License v3.0-only.
 It is forked from
 [`lprzychodzien/opencode-persistent-model-discovery`](https://github.com/lprzychodzien/opencode-persistent-model-discovery).
 The upstream Git history and author attribution are retained.
+The required upstream copyright and MIT permission notice is preserved in
+`THIRD_PARTY_NOTICES.md`. It is an attribution notice, not a change to the
+GPL-3.0-only project license.
+
+Each npm tarball includes the matching TypeScript source, tests, build scripts,
+TypeScript configuration, and `source-lock.json`. Source availability does not
+depend on access to the GitHub repository. To reproduce the build from an
+extracted package with Node.js 22 or newer:
+
+```bash
+cp source-lock.json package-lock.json
+npm ci
+npm run typecheck
+npm run typecheck:test
+npm test
+npm run build
+```
+
+`source-lock.json` is generated from the release's `package-lock.json` during
+packing because npm excludes the usual lockfile name from published packages.
+The package check verifies that matching source is included and local agent
+files are excluded. Release maintainers run `npm run check:package` before
+publishing a beta with `npm publish --tag beta --access public`.

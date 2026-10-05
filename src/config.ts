@@ -139,10 +139,11 @@ export function pluginOptions(config: Record<string, any>): Record<string, any> 
   return {}
 }
 
-export function inferConfigFlavor(config: Record<string, any>, requested?: string): ConfigFlavor {
+export function inferConfigFlavor(config: Record<string, any>, requested?: string, fallback: ConfigFlavor = "v1"): ConfigFlavor {
   if (requested === "v1" || requested === "v2") return requested
   if (config.providers !== undefined || config.plugins !== undefined) return "v2"
-  return "v1"
+  if (config.provider !== undefined || config.plugin !== undefined) return "v1"
+  return fallback
 }
 
 async function findExistingProjectConfig(directory: string): Promise<{ file: string; config: Record<string, any> } | undefined> {
@@ -196,6 +197,8 @@ export interface ProviderSetup {
   baseURL?: string
   headers?: Record<string, string>
   settings?: Record<string, unknown>
+  // Full-object editors replace supplied fields; CLI flags remain patches.
+  mode?: "merge" | "replace"
 }
 
 export interface ProviderSetupWriteResult {
@@ -206,22 +209,51 @@ export interface ProviderSetupWriteResult {
 const envReference = /^\{env:[A-Za-z_][A-Za-z0-9_]*\}$/
 const credentialHeaders = new Set(["authorization", "proxy-authorization", "x-api-key", "api-key"])
 
+function isReservedName(name: string): boolean {
+  return name === "__proto__" || name === "constructor" || name === "prototype"
+}
+
+function assertEnvReference(value: unknown, label: string): void {
+  if (typeof value !== "string" || !envReference.test(value)) {
+    throw new Error(`${label} must be an {env:NAME} reference; connect the key with /connect or SURPLUS_API_KEY instead`)
+  }
+}
+
+function assertSafeSettings(value: unknown, location: string): void {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => assertSafeSettings(entry, `${location}[${index}]`))
+    return
+  }
+  if (!isRecord(value)) return
+  for (const [name, entry] of Object.entries(value)) {
+    if (isReservedName(name)) throw new Error(`Invalid setting name: ${name}`)
+    if (name.toLowerCase() === "apikey") assertEnvReference(entry, `${location}.${name}`)
+    if (credentialHeaders.has(name.toLowerCase()) && entry !== "") assertEnvReference(entry, `Header ${name}`)
+    assertSafeSettings(entry, `${location}.${name}`)
+  }
+}
+
 // Setup writes provider options only. A credential may appear solely as an
 // `{env:NAME}` reference so the literal key stays in OpenCode's credential
 // store or the environment, never in a config file that may be committed.
 export function assertNoLiteralCredentials(setup: ProviderSetup): void {
-  for (const key of Object.keys(setup.settings ?? {})) {
-    if (key === "__proto__" || key === "constructor" || key === "prototype") throw new Error(`Invalid setting name: ${key}`)
+  assertSafeSettings(setup.settings, "settings")
+  assertSafeSettings(setup.headers, "headers")
+}
+
+function isHeaderName(name: string): boolean {
+  return /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) && !isReservedName(name)
+}
+
+export function parseHeaderObject(value: unknown): Record<string, string> {
+  if (!isRecord(value)) throw new Error("Request headers must be a JSON object.")
+  const headers: Record<string, string> = {}
+  for (const [name, entry] of Object.entries(value)) {
+    if (!isHeaderName(name)) throw new Error("Invalid header name.")
+    if (typeof entry !== "string") throw new Error("Request header values must be strings.")
+    headers[name] = entry
   }
-  const apiKey = setup.settings?.apiKey
-  if (apiKey !== undefined && (typeof apiKey !== "string" || !envReference.test(apiKey))) {
-    throw new Error("settings.apiKey must be an {env:NAME} reference; connect the key with /connect or SURPLUS_API_KEY instead")
-  }
-  for (const [name, value] of Object.entries(setup.headers ?? {})) {
-    if (credentialHeaders.has(name.toLowerCase()) && !envReference.test(value)) {
-      throw new Error(`Header ${name} must be an {env:NAME} reference; connect the key with /connect or SURPLUS_API_KEY instead`)
-    }
-  }
+  return headers
 }
 
 // Parses `Name: value` entries. An empty value removes a previously set header.
@@ -230,7 +262,7 @@ export function parseHeaderEntries(entries: string[]): Record<string, string> {
   for (const entry of entries) {
     const separator = entry.indexOf(":")
     const name = separator > 0 ? entry.slice(0, separator).trim() : ""
-    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)) throw new Error(`Invalid header entry: ${entry}`)
+    if (!isHeaderName(name)) throw new Error("Invalid header entry; expected Name: value with a valid header name")
     headers[name] = entry.slice(separator + 1).trim()
   }
   return headers
@@ -242,8 +274,8 @@ export function parseSettingEntries(entries: string[]): Record<string, unknown> 
   for (const entry of entries) {
     const separator = entry.indexOf("=")
     const key = separator > 0 ? entry.slice(0, separator).trim() : ""
-    if (!key || key === "__proto__" || key === "constructor" || key === "prototype") {
-      throw new Error(`Invalid setting entry: ${entry}`)
+    if (!key || isReservedName(key)) {
+      throw new Error("Invalid setting entry; expected key=value with a safe setting name")
     }
     const raw = entry.slice(separator + 1).trim()
     try {
@@ -272,31 +304,27 @@ export async function writeProviderSetup(
 ): Promise<ProviderSetupWriteResult> {
   assertNoLiteralCredentials(setup)
   const target = await findConfigDocument(directory, process.env.OPENCODE_CONFIG, requestedFlavor)
-  const flavor = inferConfigFlavor(target.config, requestedFlavor)
+  const flavor = inferConfigFlavor(target.config, requestedFlavor, "v2")
   const rootKey = flavor === "v1" ? "provider" : "providers"
   const root = isRecord(target.config[rootKey]) ? target.config[rootKey] : {}
   const provider = isRecord(root.surplus) ? root.surplus : {}
   provider.env ??= [SURPLUS_API_KEY_ENV]
 
-  if (flavor === "v1") {
-    // V1 passes provider options, including headers, to the AI SDK package.
-    const options = isRecord(provider.options) ? provider.options : {}
-    Object.assign(options, setup.settings)
-    if (setup.baseURL) options.baseURL = setup.baseURL
-    options.apiKey ??= `{env:${SURPLUS_API_KEY_ENV}}`
-    const headers = mergeHeaders(options.headers, setup.headers)
-    if (headers) options.headers = headers
-    else delete options.headers
-    provider.options = options
-  } else {
-    const settings = isRecord(provider.settings) ? provider.settings : {}
-    Object.assign(settings, setup.settings)
-    if (setup.baseURL) settings.baseURL = setup.baseURL
-    provider.settings = settings
-    const headers = mergeHeaders(provider.headers, setup.headers)
-    if (headers) provider.headers = headers
-    else delete provider.headers
-  }
+  const settingsKey = flavor === "v1" ? "options" : "settings"
+  const existingSettings = isRecord(provider[settingsKey]) ? provider[settingsKey] : {}
+  const settings = setup.mode === "replace" && setup.settings !== undefined
+    ? { ...setup.settings }
+    : { ...existingSettings, ...setup.settings }
+  if (setup.baseURL) settings.baseURL = setup.baseURL
+  if (flavor === "v1") settings.apiKey ??= `{env:${SURPLUS_API_KEY_ENV}}`
+
+  // V1 passes headers inside AI SDK options; V2 has a separate header map.
+  const headerTarget = flavor === "v1" ? settings : provider
+  const existingHeaders = setup.mode === "replace" && setup.headers !== undefined ? undefined : headerTarget.headers
+  const headers = mergeHeaders(existingHeaders, setup.headers)
+  if (headers) headerTarget.headers = headers
+  else delete headerTarget.headers
+  provider[settingsKey] = settings
   provider.models ??= {}
   root.surplus = provider
   target.config[rootKey] = root
