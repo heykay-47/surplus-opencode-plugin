@@ -69,3 +69,4 @@ jobs:
       - run: npm run typecheck
       - run: npm run typecheck:test
       - run: npx tsx --test test/atomic.windows.test.ts
+      - run: npm run check:package

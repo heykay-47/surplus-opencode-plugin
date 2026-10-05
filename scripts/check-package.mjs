@@ -2,8 +2,10 @@ import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
 import { readFileSync, readdirSync } from "node:fs"
 
-const npm = process.platform === "win32" ? "npm.cmd" : "npm"
-const result = JSON.parse(execFileSync(npm, ["pack", "--dry-run", "--json"], { encoding: "utf8" }))
+const npmCli = process.env.npm_execpath
+assert.ok(npmCli, "Run this check with npm run check:package")
+// Invoke the JavaScript CLI through Node; Windows cannot exec npm.cmd directly.
+const result = JSON.parse(execFileSync(process.execPath, [npmCli, "pack", "--dry-run", "--json", "--foreground-scripts=false"], { encoding: "utf8" }))
 const pkg = Array.isArray(result) ? result[0] : result["opencode-surplus"]
 assert.ok(pkg, "npm must return the package manifest")
 const paths = new Set(pkg.files.map((file) => file.path))

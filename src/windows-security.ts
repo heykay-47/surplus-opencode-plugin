@@ -104,8 +104,12 @@ function runPowerShell(script: string, variables: Record<string, string>, failur
     execFile(
       powershell,
       ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodedScript],
-      { env, windowsHide: true, timeout: 10_000, maxBuffer: 4096, encoding: "utf8" },
-      (error) => error ? reject(new Error(failureMessage)) : resolve(),
+      { env, windowsHide: true, timeout: 30_000, maxBuffer: 4096, encoding: "utf8" },
+      (error) => {
+        if (!error) return resolve()
+        const reason = error.killed ? "PowerShell timed out" : `PowerShell exit code ${error.code ?? "unknown"}`
+        reject(new Error(`${failureMessage} (${reason})`))
+      },
     )
   })
 }
