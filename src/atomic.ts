@@ -6,6 +6,7 @@ import {
   assertWindowsDirectoriesProtected,
   copyWindowsFilePermissions,
   protectWindowsDirectory,
+  renameWindowsFile,
 } from "./windows-security.js"
 
 export interface AtomicFileSystem {
@@ -33,7 +34,7 @@ export const atomicFileSystem: AtomicFileSystem = {
     if (process.platform === "win32") await copyWindowsFilePermissions(source, target)
     else await fs.chmod(target, mode)
   },
-  rename: (from, to) => fs.rename(from, to),
+  rename: (from, to) => process.platform === "win32" ? renameWindowsFile(from, to) : fs.rename(from, to),
   unlink: (file) => fs.unlink(file),
   rmdir: (directory) => fs.rmdir(directory),
 }

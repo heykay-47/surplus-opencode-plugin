@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process"
+import { promises as fs } from "node:fs"
 import path from "node:path"
 
 const checkDirectoriesScript = `
@@ -59,9 +60,8 @@ const protectDirectoryScript = `
 $ErrorActionPreference = 'Stop'
 try {
   $directory = $env:OPENCODE_SURPLUS_ACL_DIRECTORY
-  $acl = Get-Acl -LiteralPath $directory
+  $acl = [System.Security.AccessControl.DirectorySecurity]::new()
   $acl.SetAccessRuleProtection($true, $false)
-  foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRuleSpecific($rule) }
   $principals = @(
     [System.Security.Principal.WindowsIdentity]::GetCurrent().User,
     [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
@@ -79,7 +79,7 @@ try {
     )
     [void]$acl.AddAccessRule($rule)
   }
-  Set-Acl -LiteralPath $directory -AclObject $acl | Out-Null
+  [System.IO.Directory]::SetAccessControl($directory, $acl)
   exit 0
 } catch {
   exit 1
@@ -89,10 +89,23 @@ try {
 const copyPermissionsScript = `
 $ErrorActionPreference = 'Stop'
 try {
-  # Set-Acl uses automatic inheritance and can replace explicit ACEs with
-  # inherited rules from the staging parent. SetFileSecurity copies the DACL
-  # without that propagation, preserving the original inheritance policy.
-  Add-Type -TypeDefinition @'
+  $acl = Get-Acl -LiteralPath $env:OPENCODE_SURPLUS_ACL_SOURCE
+  $targetAcl = Get-Acl -LiteralPath $env:OPENCODE_SURPLUS_ACL_TARGET
+  $sid = [System.Security.Principal.SecurityIdentifier]
+  if ($acl.GetOwner($sid).Value -ne $targetAcl.GetOwner($sid).Value) { exit 2 }
+  $access = [System.Security.AccessControl.AccessControlSections]::Access
+  $raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
+  if ($acl.AreAccessRulesProtected -or ($raw.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited) -ne 0) {
+    # Only modify access rules, not owner/group/audit information. The target
+    # link is in the original directory so automatic inheritance uses the
+    # original parent, rather than the private staging directory's ACL.
+    $copy = [System.Security.AccessControl.FileSecurity]::new()
+    $copy.SetSecurityDescriptorSddlForm($acl.GetSecurityDescriptorSddlForm($access), $access)
+    [System.IO.File]::SetAccessControl($env:OPENCODE_SURPLUS_ACL_TARGET, $copy)
+  } else {
+    # Legacy DACLs do not use automatic inheritance. Preserve that policy
+    # instead of converting explicit ACEs into inherited rules.
+    Add-Type -TypeDefinition @'
 using System.Runtime.InteropServices;
 public static class SurplusFileSecurity {
   [DllImport("advapi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
@@ -100,11 +113,11 @@ public static class SurplusFileSecurity {
   public static extern bool SetFileSecurityW(string path, uint information, byte[] descriptor);
 }
 '@
-  $acl = Get-Acl -LiteralPath $env:OPENCODE_SURPLUS_ACL_SOURCE
-  $descriptor = $acl.GetSecurityDescriptorBinaryForm()
-  if (-not [SurplusFileSecurity]::SetFileSecurityW($env:OPENCODE_SURPLUS_ACL_TARGET, 4, $descriptor)) { exit 1 }
+    $descriptor = $acl.GetSecurityDescriptorBinaryForm()
+    $daclSecurityInformation = 4
+    if (-not [SurplusFileSecurity]::SetFileSecurityW($env:OPENCODE_SURPLUS_ACL_TARGET, $daclSecurityInformation, $descriptor)) { exit 1 }
+  }
   $copied = Get-Acl -LiteralPath $env:OPENCODE_SURPLUS_ACL_TARGET
-  $access = [System.Security.AccessControl.AccessControlSections]::Access
   if ($acl.GetSecurityDescriptorSddlForm($access) -ne $copied.GetSecurityDescriptorSddlForm($access)) { exit 1 }
   exit 0
 } catch {
@@ -164,10 +177,42 @@ export function protectWindowsDirectory(directory: string): Promise<void> {
   )
 }
 
-export function copyWindowsFilePermissions(source: string, target: string): Promise<void> {
-  return runPowerShell(
-    copyPermissionsScript,
-    { OPENCODE_SURPLUS_ACL_SOURCE: source, OPENCODE_SURPLUS_ACL_TARGET: target },
-    "Unable to preserve the existing file permissions before replacement",
-  )
+export async function copyWindowsFilePermissions(source: string, target: string): Promise<void> {
+  const link = path.join(path.dirname(source), `${path.basename(path.dirname(target))}.acl`)
+  await fs.link(target, link)
+  try {
+    await runPowerShell(
+      copyPermissionsScript,
+      {
+        OPENCODE_SURPLUS_ACL_SOURCE: source,
+        OPENCODE_SURPLUS_ACL_TARGET: link,
+        TEMP: path.dirname(target),
+        TMP: path.dirname(target),
+      },
+      "Unable to preserve the existing file ownership and permissions before replacement",
+    )
+  } finally {
+    await fs.unlink(link)
+  }
+}
+
+export async function renameWindowsFile(source: string, target: string): Promise<void> {
+  // Moving out of the staging directory can recalculate inherited ACEs.
+  // A hard link retains the prepared security descriptor; rename within the
+  // destination directory then replaces the config without crossing parents.
+  const link = path.join(path.dirname(target), `${path.basename(path.dirname(source))}.link`)
+  await fs.link(source, link)
+  try {
+    await fs.unlink(source)
+    await fs.rename(link, target)
+  } catch (error) {
+    try {
+      await fs.unlink(link)
+    } catch (cleanupError) {
+      if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new AggregateError([error, cleanupError], "Windows atomic replacement failed and link cleanup was incomplete", { cause: error })
+      }
+    }
+    throw error
+  }
 }

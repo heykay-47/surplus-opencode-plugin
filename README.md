@@ -201,6 +201,10 @@ POSIX permission bits are applied to the staged file before replacement;
 existing Windows file ACLs are copied before replacement. New configs use
 owner-only permissions (`0600` on POSIX, with a restricted Windows ACL). If
 staging or permission preparation fails, the existing config remains untouched.
+Windows replacements refuse files whose owner differs from the staged file's
+owner, rather than silently changing ownership. Hard-link staging preserves the
+prepared ACL when moving into the destination directory; filesystems without
+hard-link support fail before replacement.
 
 The full normalized endpoint, including its path and query, determines cache
 identity so separate proxies cannot share an inventory. Cache metadata and logs

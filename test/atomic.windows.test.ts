@@ -1,11 +1,11 @@
 import assert from "node:assert/strict"
 import { execFile } from "node:child_process"
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import { writeFileAtomically } from "../src/atomic.js"
-import { assertWindowsDirectoriesProtected } from "../src/windows-security.js"
+import { assertWindowsDirectoriesProtected, renameWindowsFile } from "../src/windows-security.js"
 
 function runIcacls(args: string[]): Promise<string> {
   const systemRoot = process.env.SystemRoot || process.env.WINDIR || "C:\\Windows"
@@ -86,7 +86,7 @@ test("Windows atomic writes preserve file ACLs and refuse shared-writable direct
     assert.equal(await runIcacls([config]), originalAcl)
 
     // Cover both protected explicit rules and an inheritance-enabled DACL.
-    await runIcacls([config, "/inheritance:r"])
+    await runIcacls([config, "/inheritance:d"])
     const protectedAcl = await runIcacls([config])
     await writeFileAtomically(config, "protected replacement")
     assert.equal(await readFile(config, "utf8"), "protected replacement")
@@ -96,6 +96,7 @@ test("Windows atomic writes preserve file ACLs and refuse shared-writable direct
     await writeFileAtomically(config, "inherited replacement")
     assert.equal(await readFile(config, "utf8"), "inherited replacement")
     assert.equal(await runIcacls([config]), inheritedAcl)
+    assert.deepEqual(await readdir(root), ["opencode.json"])
 
     await mkdir(shared)
     await runIcacls([shared, "/grant", "*S-1-5-32-545:(OI)(CI)(M)"])
@@ -107,6 +108,46 @@ test("Windows atomic writes preserve file ACLs and refuse shared-writable direct
     } finally {
       await runIcacls([shared, "/remove:g", "*S-1-5-32-545"])
     }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("Windows failed linked replacement cleans its alias and leaves the target intact", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-windows-link-"))
+  const staged = path.join(root, "staged.json")
+  const occupied = path.join(root, "occupied")
+  try {
+    await writeFile(staged, "replacement")
+    await mkdir(occupied)
+    await writeFile(path.join(occupied, "original.json"), "original")
+    await assert.rejects(renameWindowsFile(staged, occupied))
+    assert.equal(await readFile(path.join(occupied, "original.json"), "utf8"), "original")
+    assert.deepEqual(await readdir(root), ["occupied"])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("Windows rejects replacement when the original file has a different owner", {
+  skip: process.platform !== "win32",
+}, async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-windows-owner-"))
+  const config = path.join(root, "opencode.json")
+  try {
+    await writeFile(config, "original")
+    try {
+      await runIcacls([config, "/setowner", "*S-1-5-19"])
+    } catch (error) {
+      if (process.env.GITHUB_ACTIONS === "true") throw error
+      context.skip("Requires privileges to assign a different file owner")
+      return
+    }
+    await assert.rejects(writeFileAtomically(config, "replacement"), /PowerShell exit code 2/)
+    assert.equal(await readFile(config, "utf8"), "original")
+    assert.deepEqual(await readdir(root), ["opencode.json"])
   } finally {
     await rm(root, { recursive: true, force: true })
   }
