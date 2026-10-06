@@ -144,10 +144,14 @@ test("Windows preserves explicit default ACL entries under a non-inheriting pare
     const identity = await runWindowsTool("whoami.exe", ["/user", "/fo", "csv", "/nh"])
     const sid = identity.match(/S-1-\d+(?:-\d+)+/)?.[0]
     assert.ok(sid)
-    await runIcacls([root, "/inheritance:r", "/grant:r", `*${sid}:(F)`, "*S-1-5-18:(F)", "*S-1-5-32-544:(F)"])
+    const explicitGrants = ["/grant:r", `*${sid}:(F)`, "/grant:r", "*S-1-5-18:(F)", "/grant:r", "*S-1-5-32-544:(F)"]
     await writeFile(config, "original")
+    // Make both the parent and the file explicit-only; on hosted runners the
+    // file can still pick up inherited entries if only the parent is changed.
+    await runIcacls([root, "/inheritance:r", ...explicitGrants])
+    await runIcacls([config, "/inheritance:r", ...explicitGrants])
     const originalAcl = await runIcacls([config])
-    assert.equal(originalAcl.includes("(I)"), false)
+    assert.equal(originalAcl.includes("(I)"), false, `fixture ACL is not explicit-only:\n${await runIcacls([root])}\n${originalAcl}`)
     await writeFileAtomically(config, "replacement")
     assert.equal(await readFile(config, "utf8"), "replacement")
     assert.equal(await runIcacls([config]), originalAcl)
