@@ -7,15 +7,19 @@ import test from "node:test"
 import { writeFileAtomically } from "../src/atomic.js"
 import { assertWindowsDirectoriesProtected, renameWindowsFile } from "../src/windows-security.js"
 
-function runIcacls(args: string[]): Promise<string> {
+function runWindowsTool(name: string, args: string[]): Promise<string> {
   const systemRoot = process.env.SystemRoot || process.env.WINDIR || "C:\\Windows"
-  const icacls = path.join(systemRoot, "System32", "icacls.exe")
+  const executable = path.join(systemRoot, "System32", name)
   return new Promise((resolve, reject) => {
-    execFile(icacls, args, { windowsHide: true, encoding: "utf8" }, (error, stdout) => {
+    execFile(executable, args, { windowsHide: true, encoding: "utf8" }, (error, stdout) => {
       if (error) reject(error)
       else resolve(stdout)
     })
   })
+}
+
+function runIcacls(args: string[]): Promise<string> {
+  return runWindowsTool("icacls.exe", args)
 }
 
 test("Windows ACL inspection completes without stdin input", {
@@ -127,6 +131,49 @@ test("Windows failed linked replacement cleans its alias and leaves the target i
     assert.equal(await readFile(path.join(occupied, "original.json"), "utf8"), "original")
     assert.deepEqual(await readdir(root), ["occupied"])
   } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("Windows preserves explicit default ACL entries under a non-inheriting parent", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-windows-explicit-"))
+  const config = path.join(root, "opencode.json")
+  try {
+    const identity = await runWindowsTool("whoami.exe", ["/user", "/fo", "csv", "/nh"])
+    const sid = identity.match(/S-1-\d+(?:-\d+)+/)?.[0]
+    assert.ok(sid)
+    await runIcacls([root, "/inheritance:r", "/grant:r", `*${sid}:(F)`, "*S-1-5-18:(F)", "*S-1-5-32-544:(F)"])
+    await writeFile(config, "original")
+    const originalAcl = await runIcacls([config])
+    assert.equal(originalAcl.includes("(I)"), false)
+    await writeFileAtomically(config, "replacement")
+    assert.equal(await readFile(config, "utf8"), "replacement")
+    assert.equal(await runIcacls([config]), originalAcl)
+    assert.deepEqual(await readdir(root), ["opencode.json"])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("Windows new configs have private explicit ACLs even under a readable parent", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-surplus-windows-private-"))
+  const config = path.join(root, "opencode.json")
+  try {
+    await runIcacls([root, "/grant", "*S-1-5-32-545:(OI)(CI)(RX)"])
+    await writeFileAtomically(config, "new config")
+    assert.equal(await readFile(config, "utf8"), "new config")
+    assert.equal((await runIcacls([config])).includes("(I)"), false)
+    assert.equal((await runIcacls([config, "/findsid", "*S-1-5-32-545"])).includes(config), false)
+    await runIcacls([root, "/grant", "*S-1-5-11:(OI)(CI)(RX)"])
+    assert.equal((await runIcacls([config, "/findsid", "*S-1-5-11"])).includes(config), false)
+    assert.deepEqual(await readdir(root), ["opencode.json"])
+  } finally {
+    await runIcacls([root, "/remove:g", "*S-1-5-32-545"])
+    await runIcacls([root, "/remove:g", "*S-1-5-11"])
     await rm(root, { recursive: true, force: true })
   }
 })

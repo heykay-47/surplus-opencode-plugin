@@ -56,11 +56,12 @@ try {
 }
 `
 
-const protectDirectoryScript = `
+const protectPathScript = `
 $ErrorActionPreference = 'Stop'
 try {
-  $directory = $env:OPENCODE_SURPLUS_ACL_DIRECTORY
-  $acl = [System.Security.AccessControl.DirectorySecurity]::new()
+  $target = $env:OPENCODE_SURPLUS_ACL_DIRECTORY
+  $isFile = $env:OPENCODE_SURPLUS_ACL_FILE -eq 'true'
+  $acl = if ($isFile) { [System.Security.AccessControl.FileSecurity]::new() } else { [System.Security.AccessControl.DirectorySecurity]::new() }
   $acl.SetAccessRuleProtection($true, $false)
   $principals = @(
     [System.Security.Principal.WindowsIdentity]::GetCurrent().User,
@@ -68,7 +69,7 @@ try {
     [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
   )
   $rights = [System.Security.AccessControl.FileSystemRights]::FullControl
-  $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+  $inheritance = if ($isFile) { [System.Security.AccessControl.InheritanceFlags]::None } else { [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit }
   foreach ($principal in $principals) {
     $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
       $principal,
@@ -79,7 +80,7 @@ try {
     )
     [void]$acl.AddAccessRule($rule)
   }
-  [System.IO.Directory]::SetAccessControl($directory, $acl)
+  if ($isFile) { [System.IO.File]::SetAccessControl($target, $acl) } else { [System.IO.Directory]::SetAccessControl($target, $acl) }
   exit 0
 } catch {
   exit 1
@@ -89,36 +90,68 @@ try {
 const copyPermissionsScript = `
 $ErrorActionPreference = 'Stop'
 try {
-  $acl = Get-Acl -LiteralPath $env:OPENCODE_SURPLUS_ACL_SOURCE
-  $targetAcl = Get-Acl -LiteralPath $env:OPENCODE_SURPLUS_ACL_TARGET
-  $sid = [System.Security.Principal.SecurityIdentifier]
-  if ($acl.GetOwner($sid).Value -ne $targetAcl.GetOwner($sid).Value) { exit 2 }
-  $access = [System.Security.AccessControl.AccessControlSections]::Access
-  $raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
-  if ($acl.AreAccessRulesProtected -or ($raw.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited) -ne 0) {
-    # Only modify access rules, not owner/group/audit information. The target
-    # link is in the original directory so automatic inheritance uses the
-    # original parent, rather than the private staging directory's ACL.
-    $copy = [System.Security.AccessControl.FileSecurity]::new()
-    $copy.SetSecurityDescriptorSddlForm($acl.GetSecurityDescriptorSddlForm($access), $access)
-    [System.IO.File]::SetAccessControl($env:OPENCODE_SURPLUS_ACL_TARGET, $copy)
-  } else {
-    # Legacy DACLs do not use automatic inheritance. Preserve that policy
-    # instead of converting explicit ACEs into inherited rules.
-    Add-Type -TypeDefinition @'
+  # Read the stored descriptor directly; higher-level access-control objects
+  # can normalize legacy descriptors to the automatic inheritance model.
+  Add-Type -TypeDefinition @'
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 public static class SurplusFileSecurity {
   [DllImport("advapi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
   [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool GetFileSecurityW(string path, uint information, [Out] byte[] descriptor, uint length, out uint needed);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
   public static extern bool SetFileSecurityW(string path, uint information, byte[] descriptor);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+  private static extern uint SetNamedSecurityInfoW(string path, int type, uint information, System.IntPtr owner, System.IntPtr group, System.IntPtr dacl, System.IntPtr sacl);
+  public static byte[] Read(string path) {
+    const uint ownerAndDacl = 5;
+    uint needed;
+    GetFileSecurityW(path, ownerAndDacl, null, 0, out needed);
+    if (needed == 0) throw new Win32Exception(Marshal.GetLastWin32Error());
+    var descriptor = new byte[checked((int)needed)];
+    if (!GetFileSecurityW(path, ownerAndDacl, descriptor, needed, out needed))
+      throw new Win32Exception(Marshal.GetLastWin32Error());
+    return descriptor;
+  }
+  public static void WriteDacl(string path, byte[] acl, bool protect) {
+    var pointer = acl == null ? System.IntPtr.Zero : Marshal.AllocHGlobal(acl.Length);
+    try {
+      if (acl != null) Marshal.Copy(acl, 0, pointer, acl.Length);
+      const int fileObject = 1;
+      const uint daclInformation = 4;
+      uint protection = protect ? 0x80000000u : 0x20000000u;
+      uint error = SetNamedSecurityInfoW(path, fileObject, daclInformation | protection, System.IntPtr.Zero, System.IntPtr.Zero, pointer, System.IntPtr.Zero);
+      if (error != 0) throw new Win32Exception((int)error);
+    } finally {
+      if (pointer != System.IntPtr.Zero) Marshal.FreeHGlobal(pointer);
+    }
+  }
 }
 '@
-    $descriptor = $acl.GetSecurityDescriptorBinaryForm()
+  $descriptor = [SurplusFileSecurity]::Read($env:OPENCODE_SURPLUS_ACL_SOURCE)
+  $raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($descriptor, 0)
+  $target = [System.Security.AccessControl.RawSecurityDescriptor]::new([SurplusFileSecurity]::Read($env:OPENCODE_SURPLUS_ACL_TARGET), 0)
+  if ($raw.Owner.Value -ne $target.Owner.Value) { exit 2 }
+  $access = [System.Security.AccessControl.AccessControlSections]::Access
+  $modern = [System.Security.AccessControl.ControlFlags]::DiscretionaryAclProtected -bor [System.Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited
+  if (($raw.ControlFlags -band $modern) -ne 0) {
+    # Preserve ACE ordering instead of normalizing through FileSecurity.
+    # The named destination link shares the original parent for inheritance.
+    $bytes = $null
+    if ($null -ne $raw.DiscretionaryAcl) {
+      $bytes = [byte[]]::new($raw.DiscretionaryAcl.BinaryLength)
+      $raw.DiscretionaryAcl.GetBinaryForm($bytes, 0)
+    }
+    $protect = ($raw.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0
+    [SurplusFileSecurity]::WriteDacl($env:OPENCODE_SURPLUS_ACL_TARGET, $bytes, $protect)
+  } else {
+    # Legacy DACLs must not be converted to automatic inheritance.
     $daclSecurityInformation = 4
     if (-not [SurplusFileSecurity]::SetFileSecurityW($env:OPENCODE_SURPLUS_ACL_TARGET, $daclSecurityInformation, $descriptor)) { exit 1 }
   }
-  $copied = Get-Acl -LiteralPath $env:OPENCODE_SURPLUS_ACL_TARGET
-  if ($acl.GetSecurityDescriptorSddlForm($access) -ne $copied.GetSecurityDescriptorSddlForm($access)) { exit 1 }
+  $copied = [System.Security.AccessControl.RawSecurityDescriptor]::new([SurplusFileSecurity]::Read($env:OPENCODE_SURPLUS_ACL_TARGET), 0)
+  if ($raw.Owner.Value -ne $copied.Owner.Value -or $raw.GetSddlForm($access) -ne $copied.GetSddlForm($access)) { exit 1 }
   exit 0
 } catch {
   exit 1
@@ -171,7 +204,7 @@ export function assertWindowsDirectoriesProtected(directories: string[], destina
 
 export function protectWindowsDirectory(directory: string): Promise<void> {
   return runPowerShell(
-    protectDirectoryScript,
+    protectPathScript,
     { OPENCODE_SURPLUS_ACL_DIRECTORY: directory },
     "Unable to secure the temporary directory for an atomic write",
   )
@@ -191,12 +224,30 @@ export async function copyWindowsFilePermissions(source: string, target: string)
       },
       "Unable to preserve the existing file ownership and permissions before replacement",
     )
-  } finally {
-    await fs.unlink(link)
+  } catch (error) {
+    try {
+      await fs.unlink(link)
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "Windows permission preparation failed and link cleanup was incomplete", { cause: error })
+    }
+    throw error
   }
+  await fs.unlink(link)
 }
 
 export async function renameWindowsFile(source: string, target: string): Promise<void> {
+  try {
+    await fs.stat(target)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    // New files must stay private even if the destination parent later grants
+    // inheritable read access to other users.
+    await runPowerShell(
+      protectPathScript,
+      { OPENCODE_SURPLUS_ACL_DIRECTORY: source, OPENCODE_SURPLUS_ACL_FILE: "true" },
+      "Unable to secure the new file before replacement",
+    )
+  }
   // Moving out of the staging directory can recalculate inherited ACEs.
   // A hard link retains the prepared security descriptor; rename within the
   // destination directory then replaces the config without crossing parents.
